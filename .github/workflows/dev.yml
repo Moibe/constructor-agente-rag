@@ -19,18 +19,18 @@ jobs:
           echo "  Port 443" >> ~/.ssh/config
           echo "  User git" >> ~/.ssh/config
           chmod 600 ~/.ssh/config
-          
-          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
-              echo "SSH_PRIVATE_KEY is not set"; exit 1;
-          fi
-          if [ -z "${{ secrets.SSH_HOST }}" ]; then
-              echo "SSH_HOST is not set"; exit 1;
-          fi
 
-          # 2. Configurar la clave SSH para la conexión al servidor
-          install -m 600 -D /dev/null ~/.ssh/id_ed25519
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+        #   if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+        #       echo "SSH_PRIVATE_KEY is not set"; exit 1;
+        #   fi
+        #   if [ -z "${{ secrets.SSH_HOST }}" ]; then
+        #       echo "SSH_HOST is not set"; exit 1;
+        #   fi
+
+        #   # 2. Configurar la clave SSH para la conexión al servidor
+        #   install -m 600 -D /dev/null ~/.ssh/id_ed25519
+        #   echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+        #   ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
           
       - name: connect and pull
         run: | 
