@@ -13,7 +13,7 @@ jobs:
       - name: install ssh keys
         run: |
           # 1. Crear el directorio SSH y configurar el acceso a GitHub.com
-            #   mkdir -p ~/.ssh
+              mkdir -p ~/.ssh
               echo "Host github.com" >> ~/.ssh/config
               echo "  Hostname ssh.github.com" >> ~/.ssh/config
               echo "  Port 443" >> ~/.ssh/config
@@ -26,7 +26,6 @@ jobs:
           
           # 2. Configurar la clave SSH para la conexión al servidor
           #install -m 600 -D /dev/null ~/.ssh/id_ed25519
-          mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
