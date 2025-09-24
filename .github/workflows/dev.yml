@@ -19,6 +19,10 @@ jobs:
           echo "  Port 443" >> ~/.ssh/config
           echo "  User git" >> ~/.ssh/config
           chmod 600 ~/.ssh/config
+
+          echo "--- Contenido del archivo ~/.ssh/config ---"
+          cat ~/.ssh/config
+          echo "--- Fin del contenido ---"
           
           # 2. Configurar la clave SSH para la conexión al servidor
           install -m 600 -D /dev/null ~/.ssh/id_ed25519
