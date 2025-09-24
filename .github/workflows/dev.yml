@@ -1,35 +1,45 @@
 name: Mide Chatbot Dev 💵💴💶💷
 
 on:
-    push:
-        branches:
-            - dev
+  push:
+    branches:
+      - dev
 jobs:
-    run_pull:
-        name: run pull 
-        runs-on: ubuntu-latest
+  run_pull:
+    name: run pull 
+    runs-on: ubuntu-latest
 
-        steps:
-        - name: install ssh keys
-          run: |
-            if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
-                echo "SSH_PRIVATE_KEY is not set"; exit 1;
-            fi
-            if [ -z "${{ secrets.SSH_HOST }}" ]; then
-                echo "SSH_HOST is not set"; exit 1;
-            fi
-            install -m 600 -D /dev/null ~/.ssh/id_ed25519
-            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-            ssh-keyscan -H ${{ secrets.SSH_HOST }} > ~/.ssh/known_hosts
-           
-        - name: connect and pull
-          run: | 
-              ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
-              "cd code/mide-chatbot && git checkout dev \
-              && git pull origin dev \
-              && source venv/bin/activate \
-              && pip install -r requirements.txt \
-              && exit"
-                
-        - name: cleanup
-          run: rm -rf ~/.ssh
+    steps:
+      - name: install ssh keys
+        run: |
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+              echo "SSH_PRIVATE_KEY is not set"; exit 1;
+          fi
+          if [ -z "${{ secrets.SSH_HOST }}" ]; then
+              echo "SSH_HOST is not set"; exit 1;
+          fi
+
+          # 1. Crear el directorio SSH y configurar el acceso a GitHub.com
+          mkdir -p ~/.ssh
+          echo "Host github.com" >> ~/.ssh/config
+          echo "  Hostname ssh.github.com" >> ~/.ssh/config
+          echo "  Port 443" >> ~/.ssh/config
+          echo "  User git" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+          # 2. Configurar la clave SSH para la conexión al servidor
+          install -m 600 -D /dev/null ~/.ssh/id_ed25519
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+          
+      - name: connect and pull
+        run: | 
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+          "cd code/mide-chatbot && git checkout dev \
+          && git pull origin dev \
+          && source venv/bin/activate \
+          && pip install -r requirements.txt \
+          && exit"
+          
+      - name: cleanup
+        run: rm -rf ~/.ssh
