@@ -13,16 +13,16 @@ jobs:
       - name: install ssh keys
         run: |
           # 1. Crear el directorio SSH y configurar el acceso a GitHub.com
-          mkdir -p ~/.ssh
-          echo "Host github.com" >> ~/.ssh/config
-          echo "  Hostname ssh.github.com" >> ~/.ssh/config
-          echo "  Port 443" >> ~/.ssh/config
-          echo "  User git" >> ~/.ssh/config
-          chmod 600 ~/.ssh/config
+            #   mkdir -p ~/.ssh
+            #   echo "Host github.com" >> ~/.ssh/config
+            #   echo "  Hostname ssh.github.com" >> ~/.ssh/config
+            #   echo "  Port 443" >> ~/.ssh/config
+            #   echo "  User git" >> ~/.ssh/config
+            #   chmod 600 ~/.ssh/config
 
-          echo "--- Contenido del archivo ~/.ssh/config ---"
-          cat ~/.ssh/config
-          echo "--- Fin del contenido ---"
+            #   echo "--- Contenido del archivo ~/.ssh/config ---"
+            #   cat ~/.ssh/config
+            #   echo "--- Fin del contenido ---"
           
           # 2. Configurar la clave SSH para la conexión al servidor
           install -m 600 -D /dev/null ~/.ssh/id_ed25519
