@@ -14,11 +14,11 @@ jobs:
         run: |
           # 1. Crear el directorio SSH y configurar el acceso a GitHub.com
             #   mkdir -p ~/.ssh
-            #   echo "Host github.com" >> ~/.ssh/config
-            #   echo "  Hostname ssh.github.com" >> ~/.ssh/config
-            #   echo "  Port 443" >> ~/.ssh/config
-            #   echo "  User git" >> ~/.ssh/config
-            #   chmod 600 ~/.ssh/config
+              echo "Host github.com" >> ~/.ssh/config
+              echo "  Hostname ssh.github.com" >> ~/.ssh/config
+              echo "  Port 443" >> ~/.ssh/config
+              echo "  User git" >> ~/.ssh/config
+              chmod 600 ~/.ssh/config
 
             #   echo "--- Contenido del archivo ~/.ssh/config ---"
             #   cat ~/.ssh/config
