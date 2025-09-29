@@ -128,22 +128,11 @@ def delete_documents_by_filename(base_conocimiento: str, filename: str) -> int:
         print(f"Colección: {base_conocimiento}")
         print(f"Filtro de Metadato (Source): {exact_file_path}")
         print(f"Documentos (chunks) ENCONTRADOS para eliminar: {preview_count}")
-
-        time.sleep(8)
         
         if preview_count > 0:
             # Imprimir el contenido del primer documento para doble verificación
             print(f"   >>> PREVIEW (Primer chunk): {documents_to_delete['documents'][0][:100]}...")
             print(f"   >>> ID: {documents_to_delete['ids'][0]}")
-
-        
-        time.sleep(8)
-
-
-
-
-
-
 
         
         # 3. Obtener el conteo antes de la eliminación
