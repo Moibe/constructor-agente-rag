@@ -2,7 +2,7 @@
 from langchain_community.llms import Ollama
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
-from get_vector_db import get_vector_db
+from operaciones_chroma import obtenBase
 
 # ... (código de setup de LangChain, embeddings, etc.) ...
 
@@ -28,12 +28,12 @@ prompt = PromptTemplate(
     input_variables=["history", "faq_text", "user_question"],
 )
 
-def query(user_question: str, history: list = [], collection_name: str = 'local-rag'):
+def query(user_question: str, history: list = [], base_conocimiento: str = 'local-rag'):
     # La parte RAG (recuperación de la FAQ) sigue siendo la misma
     # Aquí iría el código para buscar en la DB vectorial
-    vector_db = get_vector_db(collection_name)
+    vector_db = obtenBase(base_conocimiento)
     retriever = vector_db.as_retriever()
-    retrieved_docs = retriever.get_relevant_documents(user_question)
+    retrieved_docs = retriever.invoke(user_question)    #get_relevant_documents ahora debería usar invoke o batch.
     faq_text = retrieved_docs[0].page_content if retrieved_docs else "No hay información relevante."
 
     # Formatea el historial para pasárselo al prompt

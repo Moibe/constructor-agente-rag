@@ -3,9 +3,9 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from get_vector_db import get_vector_db
-from langchain_ollama import OllamaEmbeddings
-import time 
+import operaciones_chroma
+# from langchain_ollama import OllamaEmbeddings
+
 
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 
@@ -40,9 +40,9 @@ def load_and_split_data(file_path):
 
     return chunks
 
-def embed(file_path, collection_name):
+def embed(file_path, nombre_base):
     """
-    Toma un path de archivo, carga, divide, y embebe el contenido en la DB.
+    Toma un path de archivo, carga, divide, y embebe el contenido en la base de conocimiento.
     """
     print("Estoy en función embed...")
     
@@ -54,7 +54,7 @@ def embed(file_path, collection_name):
             print("No hubo chunks...")
             return False
 
-        db = get_vector_db(collection_name)
+        db = operaciones_chroma.obtenBase(nombre_base)
         db.add_documents(chunks)
         #db.persist()
 

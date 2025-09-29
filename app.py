@@ -6,11 +6,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 
-from embed import embed
+from integrar_conocimiento import embed
 from query import query
-from get_vector_db import get_vector_db
 from delete import delete
-from listaColecciones import listaColecciones
+import bases_conocimiento
 
 # Cargar variables de entorno
 load_dotenv()
@@ -29,72 +28,114 @@ class QueryRequest(BaseModel):
     query: str
     history: list = [] # Nuevo campo para el historial de la conversación
 
-@app.post("/cargarConocimiento")
-async def cargarConocimiento(collection_name: str, file: UploadFile = File(...)):
+class DeleteRequest(BaseModel):
     """
-    Endpoint para procesar y embeber un archivo.
+    Modelo Pydantic para el cuerpo de la solicitud DELETE, 
+    asegurando que se envíe el 'filename'.
     """
-    if file.filename == '':
+    filename: str
+
+@app.post("/intergrarConocimiento")
+async def integrar_conocimiento(base_conocimiento: str, documento: UploadFile = File(...)):
+    """
+    Endpoint para procesar, dividir, vectorizar e integrar documento a la base de conocimiento.
+    """
+    if documento.filename == '':
         raise HTTPException(status_code=400, detail="No se ha seleccionado un archivo")
 
     # Guardar el archivo temporalmente para procesarlo
-    file_path = os.path.join(TEMP_FOLDER, file.filename)
+    file_path = os.path.join(TEMP_FOLDER, documento.filename)
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        shutil.copyfileobj(documento.file, buffer)
 
     try:
-        embedded = embed(file_path, collection_name)
+        embedded = embed(file_path, base_conocimiento)
         if embedded:
-            print("Archivo embebido exitosamente.")
-            return {"message": "Archivo embebido exitosamente"}
+            print("Documento integrado exitosamente..")
+            return {"message": "Integración correcta."}
         else:
             print("Error al embeber archivo...")
-            raise HTTPException(status_code=500, detail="Error al embeber el archivo")
+            raise HTTPException(status_code=500, detail="Error al integrar el documento.")
     finally:
         # Eliminar el archivo temporal
         os.remove(file_path)
 
-@app.get("/collections")
-def list_collections():
+@app.post("/crearBaseConocimiento")
+def crear_base_conocimientos(nombre_base: str):
     """
-    Endpoint para listar todas las colecciones de ChromaDB.
+    Endpoint para crear una nueva base de conocimiento vacía para el Chatbot.
     """
     try:
-        return listaColecciones()
+        return bases_conocimiento.crear_base(nombre_base)
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
 
-@app.post("/query/{collection_name}")
-def route_query(collection_name: str, request_data: QueryRequest):
-    response = query(request_data.query, request_data.history, collection_name)
+@app.get("/listarBasesConocimiento")
+def listar_bases_conocimiento():
+    """
+    Endpoint para listar todas las colecciones de éste Chatbot.
+    """
+    try:
+        return bases_conocimiento.listar_bases_conocimiento()
+    except Exception as e:
+        return {"error": f"Error al listar las colecciones: {e}"}
+
+@app.post("/chatbot")
+def chatbot(base_conocimiento: str, request_data: QueryRequest):
+    response = query(request_data.query, request_data.history, base_conocimiento)
     if response:
         return {"message": response}
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta")
 
-@app.delete("/reset")
-def route_reset():
-    """
-    Endpoint para resetear la base de datos vectorial.
-    """
-    if os.path.exists(DB_FOLDER):
-        shutil.rmtree(DB_FOLDER)
-        Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
-        return {"message": "Base de datos vectorial reseteada exitosamente."}
-    else:
-        raise HTTPException(status_code=404, detail="La base de datos vectorial no existe.")
-    
-@app.delete("/borrarColeccion/{collection_name}")
-def delete_collection(collection_name: str):
+@app.delete("/borrarBaseConocimiento")
+def borrar_base_conocimiento(base_conocimiento: str):
     """
     Endpoint para borrar una colección de ChromaDB por su nombre.
     """
     try:
-        delete(collection_name)
+        delete(base_conocimiento)
             
-        return {"message": f"Colección '{collection_name}' borrada exitosamente."}
+        return {"message": f"Colección '{base_conocimiento}' borrada exitosamente."}
     except Exception as e:
         return {"error": f"Error al borrar la colección: {e}"}
+    
+@app.get("/documentos")
+def route_list_documents(base_conocimiento: str):
+    """
+    Endpoint para listar los nombres únicos de los documentos (archivos) 
+    agregados a una colección.
+    """
+    file_names = bases_conocimiento.list_document_names(base_conocimiento)
+    
+    if not file_names:
+        # Esto sucede si la colección está vacía o si hubo un error.
+        return {"message": "La colección está vacía o no se encontraron documentos.", "files": []}
+        
+    return {
+        "cbase_conocimiento": base_conocimiento,
+        "documentos": file_names,
+        "conteo": len(file_names)
+    }
+
+
+@app.delete("/documentos")
+def route_delete_document(base_conocimiento: str, request_data: DeleteRequest):
+    """
+    Endpoint para eliminar todos los fragmentos (chunks) asociados a 
+    un nombre de archivo (filename) de una colección específica.
+    """
+    try:
+        # FastAPI automáticamente valida el JSON y lo convierte a un objeto DeleteRequest
+        deleted_count = bases_conocimiento.delete_documents_by_filename(
+            base_conocimiento=base_conocimiento, 
+            filename=request_data.filename  # Acceso a los datos con .filename
+        )
+        
+        print("Archivo borrado...")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
 if __name__ == '__main__':
     import uvicorn
