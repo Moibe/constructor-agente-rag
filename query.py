@@ -6,9 +6,6 @@ from operaciones_chroma import obtenBase
 
 # ... (código de setup de LangChain, embeddings, etc.) ...
 
-# El modelo de lenguaje que usas
-llm = OllamaLLM(model="phi3")
-
 # Define el prompt con un espacio para el historial
 # El historial se concatena en un solo string
 prompt = PromptTemplate(
@@ -29,6 +26,8 @@ prompt = PromptTemplate(
 )
 
 def query(user_question: str, history: list = [], base_conocimiento: str = 'local-rag'):
+
+    llm = OllamaLLM(model="phi3")
     # La parte RAG (recuperación de la FAQ) sigue siendo la misma
     # Aquí iría el código para buscar en la DB vectorial
     vector_db = obtenBase(base_conocimiento)
