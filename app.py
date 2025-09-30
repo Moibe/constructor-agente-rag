@@ -108,7 +108,7 @@ def borrar_base_conocimiento(base_conocimiento: str):
     except Exception as e:
         return {"error": f"Error al borrar la colección: {e}"}
     
-@app.get("/documentos",
+@app.get("/listarDocumentos",
          tags=["Documentos"])
 def route_list_documents(base_conocimiento: str):
     """
@@ -128,7 +128,7 @@ def route_list_documents(base_conocimiento: str):
     }
 
 
-@app.delete("/documento",
+@app.delete("/borrarDocumento",
             tags=["Documentos"],)
 def route_delete_document(base_conocimiento: str, request_data: DeleteRequest):
     """
