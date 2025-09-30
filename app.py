@@ -35,7 +35,11 @@ class DeleteRequest(BaseModel):
     """
     filename: str
 
-@app.post("/intergrarConocimiento")
+@app.post("/intergrarConocimiento",
+          tags=["Documentos"],
+          description="Agrega el documento a la base de conocimiento elegida.",
+          summary="Integrar Conocimiento"
+          )
 async def integrar_conocimiento(base_conocimiento: str, documento: UploadFile = File(...)):
     """
     Endpoint para procesar, dividir, vectorizar e integrar documento a la base de conocimiento.
@@ -60,7 +64,8 @@ async def integrar_conocimiento(base_conocimiento: str, documento: UploadFile = 
         # Eliminar el archivo temporal
         os.remove(file_path)
 
-@app.post("/crearBaseConocimiento")
+@app.post("/crearBaseConocimiento",
+          tags=["Bases Conocimiento"])
 def crear_base_conocimientos(nombre_base: str):
     """
     Endpoint para crear una nueva base de conocimiento vacía para el Chatbot.
@@ -70,7 +75,8 @@ def crear_base_conocimientos(nombre_base: str):
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
 
-@app.get("/listarBasesConocimiento")
+@app.get("/listarBasesConocimiento",
+         tags=["Bases Conocimiento"])
 def listar_bases_conocimiento():
     """
     Endpoint para listar todas las colecciones de éste Chatbot.
@@ -80,7 +86,8 @@ def listar_bases_conocimiento():
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
 
-@app.post("/chatbot")
+@app.post("/chatbot",
+          tags=["Chatbot"])
 def chatbot(base_conocimiento: str, request_data: QueryRequest):
     response = query(request_data.query, request_data.history, base_conocimiento)
     if response:
@@ -88,7 +95,8 @@ def chatbot(base_conocimiento: str, request_data: QueryRequest):
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta")
 
-@app.delete("/borrarBaseConocimiento")
+@app.delete("/borrarBaseConocimiento",
+            tags=["Bases Conocimiento"])
 def borrar_base_conocimiento(base_conocimiento: str):
     """
     Endpoint para borrar una colección de ChromaDB por su nombre.
@@ -100,7 +108,8 @@ def borrar_base_conocimiento(base_conocimiento: str):
     except Exception as e:
         return {"error": f"Error al borrar la colección: {e}"}
     
-@app.get("/documentos")
+@app.get("/documentos",
+         tags=["Documentos"])
 def route_list_documents(base_conocimiento: str):
     """
     Endpoint para listar los nombres únicos de los documentos (archivos) 
@@ -119,7 +128,8 @@ def route_list_documents(base_conocimiento: str):
     }
 
 
-@app.delete("/documentos")
+@app.delete("/documento",
+            tags=["Documentos"],)
 def route_delete_document(base_conocimiento: str, request_data: DeleteRequest):
     """
     Endpoint para eliminar todos los fragmentos (chunks) asociados a 
