@@ -33,7 +33,7 @@ def crear_base(nombre_base):
 
     return db
 
-def list_document_names(base_conocimiento: str) -> list[str]:
+def listar_documentos(base_conocimiento: str) -> list[str]:
     """
     Lista todos los nombres únicos de archivos (basados en el metadato 'source') 
     en una colección dada.
@@ -81,7 +81,7 @@ def list_document_names(base_conocimiento: str) -> list[str]:
         return []
     
 
-def delete_documents_by_filename(base_conocimiento: str, filename: str) -> int:
+def borrar_documento(base_conocimiento: str, filename: str) -> int:
     """
     Elimina todos los fragmentos (chunks) asociados a un nombre de archivo (filename) 
     de una colección específica en ChromaDB, utilizando el metadato 'source'.
@@ -151,6 +151,6 @@ def delete_documents_by_filename(base_conocimiento: str, filename: str) -> int:
         return deleted_count
 
     except Exception as e:
-        print(f"Error en delete_documents_by_filename: {e}")
+        print(f"Error en borrar_documento: {e}")
         # En caso de error, retornamos 0 o levantamos una excepción según la gestión de errores deseada
         return 0

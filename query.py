@@ -25,9 +25,9 @@ prompt = PromptTemplate(
     input_variables=["history", "faq_text", "user_question"],
 )
 
-def query(user_question: str, history: list = [], base_conocimiento: str = 'local-rag'):
+def query(user_question: str, history: list = [], base_conocimiento: str = 'local-rag', modelo_llm: str = 'phi3'):
 
-    llm = OllamaLLM(model="phi3")
+    llm = OllamaLLM(model=modelo_llm)
     # La parte RAG (recuperación de la FAQ) sigue siendo la misma
     # Aquí iría el código para buscar en la DB vectorial
     vector_db = obtenBase(base_conocimiento)

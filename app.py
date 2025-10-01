@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 
-from integrar_conocimiento import embed
+from documentos import embed
 from query import query
 from delete import delete
 import bases_conocimiento
@@ -26,7 +26,7 @@ Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
 # Modifica el modelo de datos para incluir un historial
 class QueryRequest(BaseModel):
     query: str
-    history: list = [] # Nuevo campo para el historial de la conversación
+    history: list = []
 
 class DeleteRequest(BaseModel):
     """
@@ -35,12 +35,33 @@ class DeleteRequest(BaseModel):
     """
     filename: str
 
-@app.post("/intergrarConocimiento",
+@app.get("/listarDocumentos",
+         tags=["Documentos"],
+         description="Lista los documentos que se han integrado a una base de conocimiento.", 
+         summary="Listar Documentos")
+def listar_documentos(base_conocimiento: str):
+    """
+    Endpoint para listar los nombres únicos de los documentos (archivos) 
+    agregados a una colección.
+    """
+    file_names = bases_conocimiento.list_document_names(base_conocimiento)
+    
+    if not file_names:
+        # Esto sucede si la colección está vacía o si hubo un error.
+        return {"message": "La colección está vacía o no se encontraron documentos.", "files": []}
+        
+    return {
+        "cbase_conocimiento": base_conocimiento,
+        "documentos": file_names,
+        "conteo": len(file_names)
+    }
+
+@app.post("/vectorizarDocumento",
           tags=["Documentos"],
-          description="Agrega el documento a la base de conocimiento elegida.",
-          summary="Integrar Conocimiento"
+          description="Carga, divide, vectoriza e integra el documento a la base de conocimiento elegida.",
+          summary="Vectorizar Documento"
           )
-async def integrar_conocimiento(base_conocimiento: str, documento: UploadFile = File(...)):
+async def vectorizar_documento(base_conocimiento: str, documento: UploadFile = File(...)):
     """
     Endpoint para procesar, dividir, vectorizar e integrar documento a la base de conocimiento.
     """
@@ -64,33 +85,12 @@ async def integrar_conocimiento(base_conocimiento: str, documento: UploadFile = 
         # Eliminar el archivo temporal
         os.remove(file_path)
 
-@app.get("/listarDocumentos",
-         tags=["Documentos"],
-         description="Lista los documentos de una Base de Conocimiento.", 
-         summary="Listar Documentos")
-def route_list_documents(base_conocimiento: str):
-    """
-    Endpoint para listar los nombres únicos de los documentos (archivos) 
-    agregados a una colección.
-    """
-    file_names = bases_conocimiento.list_document_names(base_conocimiento)
-    
-    if not file_names:
-        # Esto sucede si la colección está vacía o si hubo un error.
-        return {"message": "La colección está vacía o no se encontraron documentos.", "files": []}
-        
-    return {
-        "cbase_conocimiento": base_conocimiento,
-        "documentos": file_names,
-        "conteo": len(file_names)
-    }
 
-
-@app.delete("/borrarConocimiento",
+@app.delete("/desacoplarDocumento",
             tags=["Documentos"],
-            description="Excluye un conocimiento determinado de una Base de Conocimiento.",
-            summary="Borrar Documento")
-def route_delete_document(base_conocimiento: str, request_data: DeleteRequest):
+            description="Retira un documento determinado, borrando ese aprendizaje de esa base de conocimiento.",
+            summary="Desacoplar Documento")
+def borrar_documento(base_conocimiento: str, request_data: DeleteRequest):
     """
     Endpoint para eliminar todos los fragmentos (chunks) asociados a 
     un nombre de archivo (filename) de una colección específica.
@@ -107,6 +107,17 @@ def route_delete_document(base_conocimiento: str, request_data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
+@app.get("/listarBasesConocimiento",
+         tags=["Bases Conocimiento"])
+def listar_bases_conocimiento():
+    """
+    Endpoint para listar todas las colecciones de éste Chatbot.
+    """
+    try:
+        return bases_conocimiento.listar_bases_conocimiento()
+    except Exception as e:
+        return {"error": f"Error al listar las colecciones: {e}"}
+    
 @app.post("/crearBaseConocimiento",
           tags=["Bases Conocimiento"])
 def crear_base_conocimientos(nombre_base: str):
@@ -118,25 +129,15 @@ def crear_base_conocimientos(nombre_base: str):
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
 
-@app.get("/listarBasesConocimiento",
-         tags=["Bases Conocimiento"])
-def listar_bases_conocimiento():
-    """
-    Endpoint para listar todas las colecciones de éste Chatbot.
-    """
-    try:
-        return bases_conocimiento.listar_bases_conocimiento()
-    except Exception as e:
-        return {"error": f"Error al listar las colecciones: {e}"}
 
 @app.post("/chatbot",
           tags=["Chatbot"])
-def chatbot(base_conocimiento: str, request_data: QueryRequest):
-    response = query(request_data.query, request_data.history, base_conocimiento)
+def chatbot(base_conocimiento: str, modelo_llm: str, request_data: QueryRequest):
+    response = query(request_data.query, request_data.history, base_conocimiento, modelo_llm)
     if response:
         return {"message": response}
     else:
-        raise HTTPException(status_code=500, detail="Algo salió mal con la consulta")
+        raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
 
 @app.delete("/borrarBaseConocimiento",
             tags=["Bases Conocimiento"])
