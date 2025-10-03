@@ -44,7 +44,7 @@ def listar_documentos(base_conocimiento: str):
     Endpoint para listar los nombres únicos de los documentos (archivos) 
     agregados a una colección.
     """
-    file_names = bases_conocimiento.list_document_names(base_conocimiento)
+    file_names = bases_conocimiento.listar_documentos(base_conocimiento)
     
     if not file_names:
         # Esto sucede si la colección está vacía o si hubo un error.
