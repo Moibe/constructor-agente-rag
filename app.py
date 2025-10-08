@@ -35,6 +35,29 @@ class DeleteRequest(BaseModel):
     """
     filename: str
 
+@app.get("/listarContextos",
+         tags=["Contextos"])
+def listar_contextos():
+    """
+    Endpoint para listar todas las colecciones de éste Chatbot.
+    """
+    try:
+        resultado = contextos.listar_contextos()
+        return {"Contextos existentes para éste chatbot": resultado} 
+    except Exception as e:
+        return {"error": f"Error al listar las colecciones: {e}"}
+    
+@app.post("/crearContexto",
+          tags=["Contextos"])
+def crear_contexto(nombre_contexto: str):
+    """
+    Endpoint para crear un nueva contexto vacío para el Chatbot.
+    """
+    try:
+        return contextos.crear_contexto(nombre_contexto)
+    except Exception as e:
+        return {"error": f"Error al listar las colecciones: {e}"}
+
 @app.get("/listarDocumentos",
          tags=["Documentos"],
          description="Lista los documentos que se han integrado a un contexto.", 
@@ -42,16 +65,19 @@ class DeleteRequest(BaseModel):
 def listar_documentos(contexto: str):
     """
     Endpoint para listar los nombres únicos de los documentos (archivos) 
-    agregados a una colección.
+    agregados a una colección (contexto).
     """
     file_names = contextos.listar_documentos(contexto)
+
+    if isinstance(file_names, str):
+        return {"Ese contexto no existe en base."}
     
     if not file_names:
         # Esto sucede si la colección está vacía o si hubo un error.
-        return {"message": "La colección está vacía o no se encontraron documentos.", "files": []}
+        return {"message": "El contexto está vacío.", "files": []}
         
     return {
-        "ccontexto": contexto,
+        "contexto": contexto,
         "documentos": file_names,
         "conteo": len(file_names)
     }
@@ -107,27 +133,6 @@ def borrar_documento(contexto: str, request_data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-@app.get("/listarContextos",
-         tags=["Contextos"])
-def listar_contextos():
-    """
-    Endpoint para listar todas las colecciones de éste Chatbot.
-    """
-    try:
-        return contextos.listar_contextos()
-    except Exception as e:
-        return {"error": f"Error al listar las colecciones: {e}"}
-    
-@app.post("/crearContexto",
-          tags=["Contextos"])
-def crear_contexto(nombre_contexto: str):
-    """
-    Endpoint para crear un nueva contexto vacío para el Chatbot.
-    """
-    try:
-        return contextos.crear_contexto(nombre_contexto)
-    except Exception as e:
-        return {"error": f"Error al listar las colecciones: {e}"}
 
 
 @app.post("/chatbot",

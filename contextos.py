@@ -3,6 +3,7 @@ import chromadb
 from typing import Dict
 from pathlib import Path
 import operaciones_chroma
+import time 
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
@@ -16,7 +17,7 @@ def listar_contextos():
     # 3. Extrae los nombres de las colecciones.
     resultado = [c.name for c in contextos_existentes]
 
-    return {"Contextos existentes para éste chatbot": resultado}
+    return resultado
 
 def crear_contexto(nombre_contexto): 
     
@@ -38,40 +39,48 @@ def listar_documentos(contexto: str) -> list[str]:
     """
 
     try:
-        db = operaciones_chroma.obtenContexto(contexto)
-        print("Se obtuvo el contexto: ", db)
-        collection = db._collection
-        print("Se obtuvo la colección: ", collection)
 
-        # Obtener todos los documentos, pero solo necesitamos los metadatos.
-        # El include=['metadatas'] lo hace eficiente.
-        results = collection.get(
-            include=['metadatas']
-        )
+        resultados = listar_contextos()
 
-        print("Esto es results de listar los documentos: ")
-        print(results)
-        
-        # 1. Extraer los metadatos
-        all_metadatas = results.get('metadatas', [])        
-        
-        # 2. Obtener todas las rutas de archivo guardadas en la clave 'source'
-        source_paths = [
-            m['source'] for m in all_metadatas if 'source' in m
-        ]
-        
-        # 3. Extraer solo el nombre del archivo (basename) y asegurarse de que sean únicos
-        unique_filenames = set()
-        
-        for path in source_paths:
-            # path.split('/')[-1] extrae el nombre del archivo de la ruta
-            # os.path.basename también sirve, pero debemos manejar las barras
+        if contexto in resultados: 
+            print("La base si existe, continuar...")
+            db = operaciones_chroma.obtenContexto(contexto) #Indicar si no hubo contexto porque no existe.
+            print("Se obtuvo el contexto: ", db)
+            collection = db._collection
+            print("Se obtuvo la colección: ", collection)
+
+            # Obtener todos los documentos, pero solo necesitamos los metadatos.
+            # El include=['metadatas'] lo hace eficiente.
+            results = collection.get(
+                include=['metadatas']
+            )
+
+            print("Esto es results de listar los documentos: ")
+            print(results)
             
-            # Usaremos Pathlib para un manejo robusto de rutas en diferentes OS
-            file_name = Path(path).name
-            unique_filenames.add(file_name)
+            # 1. Extraer los metadatos
+            all_metadatas = results.get('metadatas', [])        
             
-        return sorted(list(unique_filenames))
+            # 2. Obtener todas las rutas de archivo guardadas en la clave 'source'
+            source_paths = [
+                m['source'] for m in all_metadatas if 'source' in m
+            ]
+            
+            # 3. Extraer solo el nombre del archivo (basename) y asegurarse de que sean únicos
+            unique_filenames = set()
+            
+            for path in source_paths:
+                # path.split('/')[-1] extrae el nombre del archivo de la ruta
+                # os.path.basename también sirve, pero debemos manejar las barras
+                
+                # Usaremos Pathlib para un manejo robusto de rutas en diferentes OS
+                file_name = Path(path).name
+                unique_filenames.add(file_name)
+                
+            return sorted(list(unique_filenames))
+        
+        else: 
+            return "La base está vacía."       
 
     except Exception as e:
         print(f"Error al listar documentos: {e}")

@@ -36,7 +36,7 @@ def crea_contexto(client, nombre_contexto):
         embedding_function=embedding
     )
 
-    return {f"Contexto: {nombre_contexto} creada."}
+    return {f"Contexto: {nombre_contexto} creado."}
        
 
 def contexto_existe(client, contexto):
