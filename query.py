@@ -1,12 +1,10 @@
 # query.py
-from langchain_community.llms import Ollama
+#from langchain_community.llms import Ollama
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
-from operaciones_chroma import obtenBase
+from operaciones_chroma import obtenContexto
 
-# ... (código de setup de LangChain, embeddings, etc.) ...
-
-# Define el prompt con un espacio para el historial
+# Definir el prompt con un espacio para el historial
 # El historial se concatena en un solo string
 prompt = PromptTemplate(
     template="""Eres un chatbot. Responde a la pregunta basándote en el siguiente historial y contexto.
@@ -25,12 +23,12 @@ prompt = PromptTemplate(
     input_variables=["history", "faq_text", "user_question"],
 )
 
-def query(user_question: str, history: list = [], base_conocimiento: str = 'local-rag', modelo_llm: str = 'phi3'):
+def query(user_question: str, history: list = [], contexto: str = 'local-rag', modelo_llm: str = 'phi3'):
 
     llm = OllamaLLM(model=modelo_llm)
     # La parte RAG (recuperación de la FAQ) sigue siendo la misma
     # Aquí iría el código para buscar en la DB vectorial
-    vector_db = obtenBase(base_conocimiento)
+    vector_db = obtenContexto(contexto)
     retriever = vector_db.as_retriever()
     retrieved_docs = retriever.invoke(user_question)    #get_relevant_documents ahora debería usar invoke o batch.
     faq_text = retrieved_docs[0].page_content if retrieved_docs else "No hay información relevante."

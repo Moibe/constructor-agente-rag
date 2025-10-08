@@ -40,26 +40,24 @@ def load_and_split_data(file_path):
 
     return chunks
 
-def embed(file_path, nombre_base):
+def embed(file_path, nombre_contexto):
     """
-    Toma un path de archivo, carga, divide, y embebe el contenido en la base de conocimiento.
+    Toma un path de archivo, carga, divide, y embebe el contenido en el contexto elegido.
     """
-    print("Estoy en función embed...")
     
     try:
-        print("Estoy en try de embed...")
         chunks = load_and_split_data(file_path)
         if not chunks:
             # Manejar el caso de un archivo vacío o no procesable
-            print("No hubo chunks...")
+            print("No hubo división en chunks...")
             return False
 
-        db = operaciones_chroma.obtenBase(nombre_base)
+        db = operaciones_chroma.obtenContexto(nombre_contexto)
         db.add_documents(chunks)
         #db.persist()
 
         return True
 
     except Exception as e:
-        print(f"Error during embedding process: {e}")
+        print(f"Error durante el proceso de embebido: {e}")
         return False

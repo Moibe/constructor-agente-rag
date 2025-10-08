@@ -3,46 +3,43 @@ import chromadb
 from typing import Dict
 from pathlib import Path
 import operaciones_chroma
-import time
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
-def listar_bases_conocimiento(): 
+def listar_contextos(): 
 
-    # 1. Conecta al cliente de ChromaDB.
     client = chromadb.PersistentClient(path=CHROMA_PATH)
 
-    # 2. Obtén la lista de colecciones.
-    bases_existentes = client.list_collections()
+    #Obtener la lista de colecciones.
+    contextos_existentes = client.list_collections()
 
     # 3. Extrae los nombres de las colecciones.
-    resultado = [c.name for c in bases_existentes]
+    resultado = [c.name for c in contextos_existentes]
 
-    return {"Bases de conocimiento existentes para éste chatbot": resultado}
+    return {"Contextos existentes para éste chatbot": resultado}
 
-def crear_base(nombre_base): 
+def crear_contexto(nombre_contexto): 
     
     client = chromadb.PersistentClient(path=CHROMA_PATH)
 
-    if operaciones_chroma.base_existe(client, nombre_base):
-        #Si la base existe, solo avisa que la base existe: 
-        return {"Message": f"La base {nombre_base} ya existe."}
+    if operaciones_chroma.contexto_existe(client, nombre_contexto):
+        #Si el contexto existe solo avísa: 
+        return {"Message": f"El contexto que quieres crear: {nombre_contexto} ya existe."}
     else:
-        #O sea si no existe
-        db = operaciones_chroma.crea_base(client, nombre_base)
+        #No existe
+        db = operaciones_chroma.crea_contexto(client, nombre_contexto)
 
     return db
 
-def listar_documentos(base_conocimiento: str) -> list[str]:
+def listar_documentos(contexto: str) -> list[str]:
     """
     Lista todos los nombres únicos de archivos (basados en el metadato 'source') 
     en una colección dada.
     """
 
-    print("Estoy en list document names...")
     try:
-        db = operaciones_chroma.obtenBase(base_conocimiento)
-        print("Se obtuvo la base: ", db)
+        db = operaciones_chroma.obtenContexto(contexto)
+        print("Se obtuvo el contexto: ", db)
         collection = db._collection
         print("Se obtuvo la colección: ", collection)
 
@@ -81,13 +78,13 @@ def listar_documentos(base_conocimiento: str) -> list[str]:
         return []
     
 
-def borrar_documento(base_conocimiento: str, filename: str) -> int:
+def borrar_documento(contexto: str, filename: str) -> int:
     """
     Elimina todos los fragmentos (chunks) asociados a un nombre de archivo (filename) 
     de una colección específica en ChromaDB, utilizando el metadato 'source'.
 
     Args:
-        base_conocimiento: El nombre de la colección de donde eliminar.
+        contexto: El nombre de la colección de donde eliminar.
         filename: El nombre del archivo a eliminar (ej. 'mis_faqs.pdf').
 
     Returns:
@@ -97,7 +94,7 @@ def borrar_documento(base_conocimiento: str, filename: str) -> int:
     TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 
     try:
-        db = operaciones_chroma.obtenBase(base_conocimiento)
+        db = operaciones_chroma.obtenContexto(contexto)
         collection = db._collection
 
         # 1. Reconstruir la RUTA EXACTA que LangChain guardó en el metadato 'source'.
@@ -105,6 +102,7 @@ def borrar_documento(base_conocimiento: str, filename: str) -> int:
         # las barras sean consistentes (LangChain/Linux-style).
         #exact_file_path = os.path.join(TEMP_FOLDER, filename).replace('\\', '/')
         #exact_file_path = TEMP_FOLDER + "\\" + filename
+        #Ésta es la línea que sirve por igual para Windows y para Linux.
         exact_file_path = os.path.join(TEMP_FOLDER, filename)
 
         print("Ruta reconstruida: ", exact_file_path)
@@ -125,7 +123,7 @@ def borrar_documento(base_conocimiento: str, filename: str) -> int:
         preview_count = len(documents_to_delete.get('ids', []))
 
         print("\n--- INFORME DE ELIMINACIÓN ---")
-        print(f"Colección: {base_conocimiento}")
+        print(f"Colección: {contexto}")
         print(f"Filtro de Metadato (Source): {exact_file_path}")
         print(f"Documentos (chunks) ENCONTRADOS para eliminar: {preview_count}")
         

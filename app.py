@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from documentos import embed
 from query import query
 from delete import delete
-import bases_conocimiento
+import contextos
 
 # Cargar variables de entorno
 load_dotenv()
@@ -37,33 +37,33 @@ class DeleteRequest(BaseModel):
 
 @app.get("/listarDocumentos",
          tags=["Documentos"],
-         description="Lista los documentos que se han integrado a una base de conocimiento.", 
+         description="Lista los documentos que se han integrado a un contexto.", 
          summary="Listar Documentos")
-def listar_documentos(base_conocimiento: str):
+def listar_documentos(contexto: str):
     """
     Endpoint para listar los nombres únicos de los documentos (archivos) 
     agregados a una colección.
     """
-    file_names = bases_conocimiento.listar_documentos(base_conocimiento)
+    file_names = contextos.listar_documentos(contexto)
     
     if not file_names:
         # Esto sucede si la colección está vacía o si hubo un error.
         return {"message": "La colección está vacía o no se encontraron documentos.", "files": []}
         
     return {
-        "cbase_conocimiento": base_conocimiento,
+        "ccontexto": contexto,
         "documentos": file_names,
         "conteo": len(file_names)
     }
 
 @app.post("/vectorizarDocumento",
           tags=["Documentos"],
-          description="Carga, divide, vectoriza e integra el documento a la base de conocimiento elegida.",
+          description="Carga, divide, vectoriza e integra el documento al contexto elegido.",
           summary="Vectorizar Documento"
           )
-async def vectorizar_documento(base_conocimiento: str, documento: UploadFile = File(...)):
+async def vectorizar_documento(contexto: str, documento: UploadFile = File(...)):
     """
-    Endpoint para procesar, dividir, vectorizar e integrar documento a la base de conocimiento.
+    Endpoint para procesar, dividir, vectorizar e integrar documento al contexto elegido.
     """
     if documento.filename == '':
         raise HTTPException(status_code=400, detail="No se ha seleccionado un archivo")
@@ -74,7 +74,7 @@ async def vectorizar_documento(base_conocimiento: str, documento: UploadFile = F
         shutil.copyfileobj(documento.file, buffer)
 
     try:
-        embedded = embed(file_path, base_conocimiento)
+        embedded = embed(file_path, contexto)
         if embedded:
             print("Documento integrado exitosamente..")
             return {"message": "Integración correcta."}
@@ -88,17 +88,17 @@ async def vectorizar_documento(base_conocimiento: str, documento: UploadFile = F
 
 @app.delete("/desacoplarDocumento",
             tags=["Documentos"],
-            description="Retira un documento determinado, borrando ese aprendizaje de esa base de conocimiento.",
+            description="Retira un documento determinado, borrando ese aprendizaje de ese contexto.",
             summary="Desacoplar Documento")
-def borrar_documento(base_conocimiento: str, request_data: DeleteRequest):
+def borrar_documento(contexto: str, request_data: DeleteRequest):
     """
     Endpoint para eliminar todos los fragmentos (chunks) asociados a 
     un nombre de archivo (filename) de una colección específica.
     """
     try:
         # FastAPI automáticamente valida el JSON y lo convierte a un objeto DeleteRequest
-        deleted_count = bases_conocimiento.delete_documents_by_filename(
-            base_conocimiento=base_conocimiento, 
+        deleted_count = contextos.delete_documents_by_filename(
+            contexto=contexto, 
             filename=request_data.filename  # Acceso a los datos con .filename
         )
         
@@ -107,48 +107,48 @@ def borrar_documento(base_conocimiento: str, request_data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-@app.get("/listarBasesConocimiento",
-         tags=["Bases Conocimiento"])
-def listar_bases_conocimiento():
+@app.get("/listarContextos",
+         tags=["Contextos"])
+def listar_contextos():
     """
     Endpoint para listar todas las colecciones de éste Chatbot.
     """
     try:
-        return bases_conocimiento.listar_bases_conocimiento()
+        return contextos.listar_contextos()
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
     
-@app.post("/crearBaseConocimiento",
-          tags=["Bases Conocimiento"])
-def crear_base_conocimientos(nombre_base: str):
+@app.post("/crearContexto",
+          tags=["Contextos"])
+def crear_contexto(nombre_contexto: str):
     """
-    Endpoint para crear una nueva base de conocimiento vacía para el Chatbot.
+    Endpoint para crear un nueva contexto vacío para el Chatbot.
     """
     try:
-        return bases_conocimiento.crear_base(nombre_base)
+        return contextos.crear_contexto(nombre_contexto)
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
 
 
 @app.post("/chatbot",
           tags=["Chatbot"])
-def chatbot(base_conocimiento: str, modelo_llm: str, request_data: QueryRequest):
-    response = query(request_data.query, request_data.history, base_conocimiento, modelo_llm)
+def chatbot(contexto: str, modelo_llm: str, request_data: QueryRequest):
+    response = query(request_data.query, request_data.history, contexto, modelo_llm)
     if response:
         return {"message": response}
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
 
-@app.delete("/borrarBaseConocimiento",
-            tags=["Bases Conocimiento"])
-def borrar_base_conocimiento(base_conocimiento: str):
+@app.delete("/borrarContexto",
+            tags=["Contextos"])
+def borrar_contexto(contexto: str):
     """
     Endpoint para borrar una colección de ChromaDB por su nombre.
     """
     try:
-        delete(base_conocimiento)
+        delete(contexto)
             
-        return {"message": f"Colección '{base_conocimiento}' borrada exitosamente."}
+        return {"message": f"Colección '{contexto}' borrada exitosamente."}
     except Exception as e:
         return {"error": f"Error al borrar la colección: {e}"}
     
