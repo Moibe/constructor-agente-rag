@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 
 from documentos import embed
 from query import query
@@ -23,10 +24,16 @@ DB_FOLDER = os.getenv('VECTOR_DB_FOLDER', './vector_db')
 Path(TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
 
-# Modifica el modelo de datos para incluir un historial
-class QueryRequest(BaseModel):
-    query: str
-    history: list = []
+class ChatRequest(BaseModel):
+    # Datos que antes iban separados
+    contexto: str = None 
+    modelo_llm: str
+    pregunta: str
+    historial: list = []
+
+# class QueryRequest(BaseModel):
+#     query: str
+#     history: list = []
 
 class DeleteRequest(BaseModel):
     """
@@ -140,8 +147,14 @@ def borrar_documento(contexto: str, request_data: DeleteRequest):
 
 @app.post("/chatbot",
           tags=["Chatbot"])
-def chatbot(contexto: str, modelo_llm: str, request_data: QueryRequest):
-    response = query(request_data.query, request_data.history, contexto, modelo_llm)
+def chatbot(data: ChatRequest):
+
+    print(f"Modelo LLM: {data.modelo_llm}")
+    print(f"Contexto: {data.contexto}")
+    print(f"Query: {data.pregunta}")
+    print(f"Historial: {data.historial}")
+
+    response = query(data.pregunta, data.historial, data.contexto, data.modelo_llm)
     if response:
         return {"message": response}
     else:

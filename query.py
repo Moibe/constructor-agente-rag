@@ -3,6 +3,7 @@
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
 from operaciones_chroma import obtenContexto
+import time
 
 # Definir el prompt con un espacio para el historial
 # El historial se concatena en un solo string
@@ -25,9 +26,14 @@ prompt = PromptTemplate(
 
 def query(user_question: str, history: list = [], contexto: str = 'local-rag', modelo_llm: str = 'phi3'):
 
-    llm = OllamaLLM(model=modelo_llm)
-    # La parte RAG (recuperación de la FAQ) sigue siendo la misma
-    # Aquí iría el código para buscar en la DB vectorial
+    try: 
+        llm = OllamaLLM(model=modelo_llm)
+    except Exception as e:
+        print(f"Error al listar las colecciones: {e}")
+        time.sleep(18)
+        return {"error": f"Error al listar las colecciones: {e}"}
+    
+
     vector_db = obtenContexto(contexto)
     retriever = vector_db.as_retriever()
     retrieved_docs = retriever.invoke(user_question)    #get_relevant_documents ahora debería usar invoke o batch.
