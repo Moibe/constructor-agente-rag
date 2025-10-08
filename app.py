@@ -56,7 +56,7 @@ def crear_contexto(nombre_contexto: str):
     try:
         return contextos.crear_contexto(nombre_contexto)
     except Exception as e:
-        return {"error": f"Error al listar las colecciones: {e}"}
+        return {"error": f"Error al crear contexto: {e}"}
 
 @app.get("/listarDocumentos",
          tags=["Documentos"],
@@ -98,6 +98,9 @@ async def vectorizar_documento(contexto: str, documento: UploadFile = File(...))
     file_path = os.path.join(TEMP_FOLDER, documento.filename)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(documento.file, buffer)
+
+    #Quizá aquí antes checar primero si existe el contexto.
+    
 
     try:
         embedded = embed(file_path, contexto)
@@ -153,9 +156,9 @@ def borrar_contexto(contexto: str):
     try:
         delete(contexto)
             
-        return {"message": f"Colección '{contexto}' borrada exitosamente."}
+        return {"message": f"Contexto '{contexto}' borrada exitosamente."}
     except Exception as e:
-        return {"error": f"Error al borrar la colección: {e}"}
+        return {"error": f"Error al borrar contexto: {e}"}
     
 
 if __name__ == '__main__':

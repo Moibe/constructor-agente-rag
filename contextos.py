@@ -40,9 +40,7 @@ def listar_documentos(contexto: str) -> list[str]:
 
     try:
 
-        resultados = listar_contextos()
-
-        if contexto in resultados: 
+        if existe_contexto(contexto): 
             print("La base si existe, continuar...")
             db = operaciones_chroma.obtenContexto(contexto) #Indicar si no hubo contexto porque no existe.
             print("Se obtuvo el contexto: ", db)
@@ -161,3 +159,12 @@ def borrar_documento(contexto: str, filename: str) -> int:
         print(f"Error en borrar_documento: {e}")
         # En caso de error, retornamos 0 o levantamos una excepción según la gestión de errores deseada
         return 0
+    
+def existe_contexto(contexto: str): 
+
+    resultados = listar_contextos()
+
+    if contexto in resultados:
+        return True
+    else:
+        return False 
