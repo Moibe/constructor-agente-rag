@@ -16,7 +16,7 @@ load_dotenv()
 
 app = FastAPI(
     title="Chatbot - Mide",
-    description="Documentación de la API para servicios de Monitoreo y Generación.",
+    description="Operaciones generales de chatbot incluídas la creación de contextos, su carga de documentos e interacción con chatbot.",
     version="0.0.0"
 )
 
@@ -79,7 +79,7 @@ def listar_documentos(contexto: str):
     
     if not file_names:
         # Esto sucede si la colección está vacía o si hubo un error.
-        return {"message": "El contexto está vacío.", "files": []}
+        return {f"message": "El contexto {contexto} está vacío.", "files": []}
         
     return {
         "contexto": contexto,
