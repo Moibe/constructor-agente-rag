@@ -10,10 +10,10 @@ def listar_contextos():
 
     client = chromadb.PersistentClient(path=CHROMA_PATH)
 
-    #Obtener la lista de colecciones.
+    #Obtener la lista de contextos.
     contextos_existentes = client.list_collections()
 
-    # 3. Extrae los nombres de las colecciones.
+    #Extrae los nombres de las colecciones.
     resultado = [c.name for c in contextos_existentes]
 
     return resultado

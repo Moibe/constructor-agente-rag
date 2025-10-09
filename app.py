@@ -14,7 +14,6 @@ from documentos import embed
 # Cargar variables de entorno
 load_dotenv()
 
-# Inicializar la aplicación
 app = FastAPI(
     title="Chatbot - Mide",
     description="Documentación de la API para servicios de Monitoreo y Generación.",
@@ -28,15 +27,11 @@ Path(TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
 
 class ChatRequest(BaseModel):
-    # Datos que antes iban separados
     contexto: str = None 
     modelo_llm: str
     pregunta: str
     historial: list = []
 
-# class QueryRequest(BaseModel):
-#     query: str
-#     history: list = []
 
 class DeleteRequest(BaseModel):
     """
@@ -92,12 +87,12 @@ def listar_documentos(contexto: str):
         "conteo": len(file_names)
     }
 
-@app.post("/vectorizarDocumento",
+@app.post("/integrarDocumento",
           tags=["Documentos"],
           description="Carga, divide, vectoriza e integra el documento al contexto elegido.",
-          summary="Vectorizar Documento"
+          summary="Integrar Documento"
           )
-async def vectorizar_documento(contexto: str, documento: UploadFile = File(...)):
+async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
     """
     Endpoint para procesar, dividir, vectorizar e integrar documento al contexto elegido.
     """
