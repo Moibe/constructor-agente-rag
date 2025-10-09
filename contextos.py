@@ -40,7 +40,7 @@ def listar_documentos(contexto: str) -> list[str]:
     try:
 
         if existe_contexto(contexto): 
-            print("La base si existe, continuar...")
+            #print("La base si existe, continuar...")
             db = operaciones_chroma.obtenContexto(contexto) #Indicar si no hubo contexto porque no existe.
             #print("Se obtuvo el contexto: ", db)
             collection = db._collection
@@ -111,7 +111,7 @@ def borrar_documento(contexto: str, filename: str) -> int:
         #Ésta es la línea que sirve por igual para Windows y para Linux.
         exact_file_path = os.path.join(TEMP_FOLDER, filename)
 
-        print("Ruta reconstruida: ", exact_file_path)
+        #print("Ruta reconstruida: ", exact_file_path)
 
         # 2. Definir el filtro de metadatos (asumimos que la clave es 'source')
         where_filter: Dict[str, str] = {
@@ -149,7 +149,6 @@ def borrar_documento(contexto: str, filename: str) -> int:
         
         # 5. Calcular los eliminados
         final_count = collection.count()
-        print("El final countdown es: ", final_count)
         deleted_count = initial_count - final_count
 
         return deleted_count

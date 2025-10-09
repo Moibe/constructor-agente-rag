@@ -3,20 +3,23 @@ import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException
 
-from documentos import embed
+import contextos
 from query import query
 from delete import delete
-import contextos
+from documentos import embed
 
 # Cargar variables de entorno
 load_dotenv()
 
 # Inicializar la aplicación
-app = FastAPI()
+app = FastAPI(
+    title="Chatbot - Mide",
+    description="Documentación de la API para servicios de Monitoreo y Generación.",
+    version="0.0.0"
+)
 
 # Definir la carpeta temporal para los archivos y la carpeta de la base de datos vectorial
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
@@ -50,7 +53,7 @@ def listar_contextos():
     """
     try:
         resultado = contextos.listar_contextos()
-        return {"Contextos existentes para éste chatbot": resultado} 
+        return {"Contextos existentes para este chatbot": resultado} 
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
     

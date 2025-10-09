@@ -26,7 +26,7 @@ def save_file(file):
 
 # Function to load and split the data from the PDF file
 def load_and_split_data(file_path):
-    print("Estoy en load and split...")
+    print("Load y split...")
     
     # Load the PDF file and split the data into chunks
     loader = UnstructuredPDFLoader(file_path=file_path, language="spanish")
