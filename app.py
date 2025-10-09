@@ -75,11 +75,11 @@ def listar_documentos(contexto: str):
     file_names = contextos.listar_documentos(contexto)
 
     if isinstance(file_names, str):
-        return {"Ese contexto no existe en base."}
+        return {f"El contexto {contexto} no existe en base."}
     
     if not file_names:
         # Esto sucede si la colección está vacía o si hubo un error.
-        return {"Mensaje": "El contexto está vacío.", "files": []}
+        return {"Mensaje": f"El contexto {contexto} está vacío.", "files": []}
         
     return {
         "contexto": contexto,
@@ -138,7 +138,7 @@ def borrar_documento(data: DeleteRequest):
         )
         
         print("Archivo borrado...")
-        return {"message": f"Archivo {data.filename} borrado correctamente del contexto: {data.contexto}."}
+        return {"Mensaje": f"Archivo {data.filename} borrado correctamente del contexto: {data.contexto}."}
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
@@ -156,7 +156,7 @@ def chatbot(data: ChatRequest):
 
     response = query(data.pregunta, data.historial, data.contexto, data.modelo_llm)
     if response:
-        return {"message": response}
+        return {"Mensaje": response}
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
 
@@ -169,7 +169,7 @@ def borrar_contexto(contexto: str):
     try:
         delete(contexto)
             
-        return {"message": f"Contexto '{contexto}' borrada exitosamente."}
+        return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
     except Exception as e:
         return {"error": f"Error al borrar contexto: {e}"}
     

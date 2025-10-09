@@ -24,7 +24,7 @@ def crear_contexto(nombre_contexto):
 
     if operaciones_chroma.contexto_existe(client, nombre_contexto):
         #Si el contexto existe solo avísa: 
-        return {"Message": f"El contexto que quieres crear: {nombre_contexto} ya existe."}
+        return {"Mensaje": f"El contexto que quieres crear: {nombre_contexto} ya existe."}
     else:
         #No existe
         db = operaciones_chroma.crea_contexto(client, nombre_contexto)
