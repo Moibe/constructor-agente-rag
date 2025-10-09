@@ -46,7 +46,7 @@ class DeleteRequest(BaseModel):
          tags=["Contextos"])
 def listar_contextos():
     """
-    Endpoint para listar todas las colecciones de éste Chatbot.
+    Endpoint para listar todos los contextos del Chatbot.
     """
     try:
         resultado = contextos.listar_contextos()

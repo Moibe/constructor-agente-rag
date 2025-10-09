@@ -3,7 +3,6 @@ import chromadb
 from typing import Dict
 from pathlib import Path
 import operaciones_chroma
-import time 
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
@@ -43,9 +42,9 @@ def listar_documentos(contexto: str) -> list[str]:
         if existe_contexto(contexto): 
             print("La base si existe, continuar...")
             db = operaciones_chroma.obtenContexto(contexto) #Indicar si no hubo contexto porque no existe.
-            print("Se obtuvo el contexto: ", db)
+            #print("Se obtuvo el contexto: ", db)
             collection = db._collection
-            print("Se obtuvo la colección: ", collection)
+            print("Se obtuvo el contexto: ", collection)
 
             # Obtener todos los documentos, pero solo necesitamos los metadatos.
             # El include=['metadatas'] lo hace eficiente.
@@ -53,8 +52,8 @@ def listar_documentos(contexto: str) -> list[str]:
                 include=['metadatas']
             )
 
-            print("Esto es results de listar los documentos: ")
-            print(results)
+            # print("Esto es results de listar los documentos: ")
+            # print(results)
             
             # 1. Extraer los metadatos
             all_metadatas = results.get('metadatas', [])        

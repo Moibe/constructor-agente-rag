@@ -3,7 +3,6 @@
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
 from operaciones_chroma import obtenContexto
-import time
 
 # Definir el prompt con un espacio para el historial
 # El historial se concatena en un solo string
@@ -30,7 +29,6 @@ def query(user_question: str, history: list = [], contexto: str = 'local-rag', m
         llm = OllamaLLM(model=modelo_llm)
     except Exception as e:
         print(f"Error al listar las colecciones: {e}")
-        time.sleep(18)
         return {"error": f"Error al listar las colecciones: {e}"}
     
 
