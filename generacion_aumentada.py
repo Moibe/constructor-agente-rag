@@ -6,8 +6,6 @@ from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-
-
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 
 # Function to check if the uploaded file is allowed (only PDF files)
@@ -32,6 +30,7 @@ def load_and_split_data(file_path):
     
     # Load the PDF file and split the data into chunks
     loader = UnstructuredPDFLoader(file_path=file_path, language="spanish")
+    print("UnstructuredPDFLoader listo.")
     data = loader.load()
     print("Carga de documento completada.")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)

@@ -104,20 +104,21 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(documento.file, buffer)
 
-    #Quizá aquí antes checar primero si existe el contexto.
     
-
-    try:
-        embedded = embed(file_path, contexto)
-        if embedded:
-            print("Documento integrado exitosamente..")
-            return {"message": "Integración correcta."}
-        else:
-            print("Error al embeber archivo...")
-            raise HTTPException(status_code=500, detail="Error al integrar el documento.")
-    finally:
-        # Eliminar el archivo temporal
-        os.remove(file_path)
+    if contextos.existe_contexto(contexto):
+        try:
+            embedded = embed(file_path, contexto)
+            if embedded:
+                print("Documento integrado exitosamente..")
+                return {"mensaje": "Integración correcta."}
+            else:
+                print("Error al embeber archivo...")
+                raise HTTPException(status_code=500, detail="Error al integrar el documento.")
+        finally:
+            # Eliminar el archivo temporal
+            os.remove(file_path)
+    else: 
+        return {"mensaje": f"No existe el contexto {contexto} al que quieres integrar el documento."}
 
 
 @app.delete("/desacoplarDocumento",
