@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 import contextos
 from query import query
 from delete import delete
-from documentos import embed
+from generacion_aumentada import embed
 
 # Cargar variables de entorno
 load_dotenv()
@@ -32,12 +32,12 @@ class ChatRequest(BaseModel):
     pregunta: str
     historial: list = []
 
-
 class DeleteRequest(BaseModel):
     """
     Modelo Pydantic para el cuerpo de la solicitud DELETE, 
     asegurando que se envíe el 'filename'.
     """
+    contexto: str = None 
     filename: str
 
 @app.get("/listarContextos",
@@ -79,7 +79,7 @@ def listar_documentos(contexto: str):
     
     if not file_names:
         # Esto sucede si la colección está vacía o si hubo un error.
-        return {f"message": "El contexto {contexto} está vacío.", "files": []}
+        return {"Mensaje": "El contexto está vacío.", "files": []}
         
     return {
         "contexto": contexto,
@@ -124,19 +124,20 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             tags=["Documentos"],
             description="Retira un documento determinado, borrando ese aprendizaje de ese contexto.",
             summary="Desacoplar Documento")
-def borrar_documento(contexto: str, request_data: DeleteRequest):
+def borrar_documento(data: DeleteRequest):
     """
     Endpoint para eliminar todos los fragmentos (chunks) asociados a 
     un nombre de archivo (filename) de una colección específica.
     """
     try:
         # FastAPI automáticamente valida el JSON y lo convierte a un objeto DeleteRequest
-        deleted_count = contextos.delete_documents_by_filename(
-            contexto=contexto, 
-            filename=request_data.filename  # Acceso a los datos con .filename
+        deleted_count = contextos.borrar_documento(
+            contexto=data.contexto, 
+            filename=data.filename  # Acceso a los datos con .filename
         )
         
         print("Archivo borrado...")
+        return {"message": f"Archivo {data.filename} borrado correctamente del contexto: {data.contexto}."}
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")

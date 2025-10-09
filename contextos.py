@@ -52,8 +52,6 @@ def listar_documentos(contexto: str) -> list[str]:
                 include=['metadatas']
             )
 
-            # print("Esto es results de listar los documentos: ")
-            # print(results)
             
             # 1. Extraer los metadatos
             all_metadatas = results.get('metadatas', [])        

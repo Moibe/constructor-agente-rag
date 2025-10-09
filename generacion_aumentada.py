@@ -1,10 +1,11 @@
 import os
+import operaciones_chroma
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-import operaciones_chroma
-# from langchain_ollama import OllamaEmbeddings
+
+
 
 
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
@@ -26,17 +27,17 @@ def save_file(file):
 
 # Function to load and split the data from the PDF file
 def load_and_split_data(file_path):
-    print("Load y split...")
+    print("Cargando documento...")
+    print("Subdividiendo documento...")
     
     # Load the PDF file and split the data into chunks
     loader = UnstructuredPDFLoader(file_path=file_path, language="spanish")
-    print("Loader listo...")
     data = loader.load()
-    print("Data listo...")
+    print("Carga de documento completada.")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
-    print("Text splitter listo...")
+    print("Divisor (splitter) cargado y listo para dividir.")
     chunks = text_splitter.split_documents(data)
-    print("Chunks listos...")
+    print("Subdivisiones (chunks) listas.")
 
     return chunks
 
