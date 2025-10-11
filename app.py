@@ -11,6 +11,8 @@ from query import query
 from delete import delete
 from generacion_aumentada import embed
 
+import herramientas
+
 # Cargar variables de entorno
 load_dotenv()
 
@@ -74,6 +76,10 @@ def listar_documentos(contexto: str):
     """
     file_names = contextos.listar_documentos(contexto)
 
+    #Momentaneamente voy a debuguear lo que hay aquí: 
+    print("Inicializando degub...")
+    herramientas.debug_check_file_hash_storage(contexto)
+    
     if isinstance(file_names, str):
         return {f"El contexto {contexto} no existe en base."}
     
@@ -106,6 +112,17 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
 
     
     if contextos.existe_contexto(contexto):
+
+        #REVISIÓN DE EXISTENCIA PREVIA DE ESOS VECTORES PARA EVITAR DUPLICIDAD
+        # 1. Calcular el hash del archivo subido
+        current_hash = herramientas.calculate_file_hash(file_path)
+        print("El current hash obtenido es: ", current_hash)
+
+        # 2. Verificar si el contenido ya fue subido
+        if herramientas.is_content_duplicate(contexto, current_hash):
+            print(f"El archivo {file_path} ya existe en la colección (Hash: {current_hash}). Saltando el embebido.")
+            return {"mensaje": "Éste documento ya había sido integrado previamente."} # Ya está embebido, lo tratamos como éxito.
+
         try:
             embedded = embed(file_path, contexto)
             if embedded:
@@ -143,8 +160,6 @@ def borrar_documento(data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-
-
 @app.post("/chatbot",
           tags=["Chatbot"])
 def chatbot(data: ChatRequest):
@@ -171,8 +186,7 @@ def borrar_contexto(contexto: str):
             
         return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
     except Exception as e:
-        return {"error": f"Error al borrar contexto: {e}"}
-    
+        return {"error": f"Error al borrar contexto: {e}"}    
 
 if __name__ == '__main__':
     import uvicorn
