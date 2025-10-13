@@ -20,7 +20,7 @@ def obtenContexto(nombre_contexto):
     if db._collection.count() > 0:
         print(f"La colección '{nombre_contexto}' existe y tiene {db._collection.count()} documentos.")
     else:
-        print(f"La colección '{nombre_contexto}' no existe o está vacía.")
+        print(f"La colección '{nombre_contexto}' está vacía.")
 
     return db
 

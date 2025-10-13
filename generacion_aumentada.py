@@ -40,7 +40,7 @@ def load_and_split_data(file_path):
 
     return chunks
 
-def embed(file_path, nombre_contexto):
+def embed(file_path, nombre_contexto, current_hash):
     """
     Toma un path de archivo, carga, divide, y embebe el contenido en el contexto elegido.
     """

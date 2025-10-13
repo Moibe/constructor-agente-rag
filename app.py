@@ -18,7 +18,7 @@ load_dotenv()
 
 app = FastAPI(
     title="Chatbot - Mide",
-    description="Operaciones generales de chatbot incluídas la creación de contextos, su carga de documentos e interacción con chatbot.",
+    description="Operaciones generales de chatbot incluídas la creación de contextos, carga de documentos e interacción con chatbot.",
     version="0.0.0"
 )
 
@@ -49,7 +49,7 @@ def listar_contextos():
     Endpoint para listar todos los contextos del Chatbot.
     """
     try:
-        resultado = contextos.listar_contextos()
+        resultado = contextos.listar_contextos_con_conteo()
         return {"Contextos existentes para este chatbot": resultado} 
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
@@ -124,7 +124,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             return {"mensaje": "Éste documento ya había sido integrado previamente."} # Ya está embebido, lo tratamos como éxito.
 
         try:
-            embedded = embed(file_path, contexto)
+            embedded = embed(file_path, contexto, current_hash)
             if embedded:
                 print("Documento integrado exitosamente..")
                 return {"mensaje": "Integración correcta."}

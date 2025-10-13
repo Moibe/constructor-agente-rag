@@ -3,6 +3,7 @@ import chromadb
 from typing import Dict
 from pathlib import Path
 import operaciones_chroma
+from typing import Dict, Any, List
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
@@ -17,6 +18,44 @@ def listar_contextos():
     resultado = [c.name for c in contextos_existentes]
 
     return resultado
+
+def listar_contextos_con_conteo() -> Dict[str, int]:
+    """
+    Lista todos los contextos existentes y la cantidad de documentos 
+    únicos cargados en cada uno, utilizando listar_documentos().
+    
+    Returns:
+        Un diccionario en formato {nombre_coleccion: cantidad_documentos_unicos}.
+    """
+    try:
+        # 1. Conecta al cliente persistente de ChromaDB.
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        contextos_existentes = client.list_collections()
+        
+        conteo_por_contexto: Dict[str, int] = {}
+
+        # 2. Iterar sobre las colecciones
+        for collection_object in contextos_existentes:
+            nombre_contexto = collection_object.name
+            
+            # 3. Llamar a la función existente: listar_documentos
+            # Esta función devuelve una lista[str] de nombres únicos o un mensaje de error (str).
+            resultado_listado = listar_documentos(nombre_contexto)
+            
+            # 4. Manejar el resultado
+            if isinstance(resultado_listado, List):
+                # Si es una lista (de nombres únicos), contamos su longitud
+                cantidad_documentos_unicos = len(resultado_listado)
+                conteo_por_contexto[nombre_contexto] = cantidad_documentos_unicos
+            else:
+                # Si es un mensaje de error (como "La base está vacía."), el conteo es 0.
+                conteo_por_contexto[nombre_contexto] = 0
+
+        return conteo_por_contexto
+
+    except Exception as e:
+        print(f"Error al listar contextos con conteo: {e}")
+        return {}
 
 def crear_contexto(nombre_contexto): 
     
