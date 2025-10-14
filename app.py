@@ -6,10 +6,9 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File, HTTPException
 
-import contextos
-from query import query
-from delete import delete
-from generacion_aumentada import embed
+import funciones
+import chatbot as asistente
+import generacion_aumentada
 
 import herramientas
 
@@ -49,7 +48,7 @@ def listar_contextos():
     Endpoint para listar todos los contextos del Chatbot.
     """
     try:
-        resultado = contextos.listar_contextos_con_conteo()
+        resultado = funciones.listar_contextos_con_conteo()
         return {"Contextos existentes para este chatbot": resultado} 
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
@@ -61,9 +60,23 @@ def crear_contexto(nombre_contexto: str):
     Endpoint para crear un nueva contexto vacío para el Chatbot.
     """
     try:
-        return contextos.crear_contexto(nombre_contexto)
+        return funciones.crear_contexto(nombre_contexto)
     except Exception as e:
         return {"error": f"Error al crear contexto: {e}"}
+    
+
+@app.delete("/borrarContexto",
+            tags=["Contextos"])
+def borrar_contexto(contexto: str):
+    """
+    Endpoint para borrar una colección de ChromaDB por su nombre.
+    """
+    try:
+        funciones.delete_contexto(contexto)
+            
+        return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
+    except Exception as e:
+        return {"error": f"Error al borrar contexto: {e}"}    
 
 @app.get("/listarDocumentos",
          tags=["Documentos"],
@@ -74,7 +87,7 @@ def listar_documentos(contexto: str):
     Endpoint para listar los nombres únicos de los documentos (archivos) 
     agregados a una colección (contexto).
     """
-    file_names = contextos.listar_documentos(contexto)
+    file_names = funciones.listar_documentos(contexto)
 
     #Momentaneamente voy a debuguear lo que hay aquí: 
     print("Inicializando degub...")
@@ -111,7 +124,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
         shutil.copyfileobj(documento.file, buffer)
 
     
-    if contextos.existe_contexto(contexto):
+    if funciones.existe_contexto(contexto):
 
         #REVISIÓN DE EXISTENCIA PREVIA DE ESOS VECTORES PARA EVITAR DUPLICIDAD
         # 1. Calcular el hash del archivo subido
@@ -124,7 +137,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             return {"mensaje": "Éste documento ya había sido integrado previamente."} # Ya está embebido, lo tratamos como éxito.
 
         try:
-            embedded = embed(file_path, contexto, current_hash)
+            embedded = generacion_aumentada.embed(file_path, contexto, current_hash)
             if embedded:
                 print("Documento integrado exitosamente..")
                 return {"mensaje": "Integración correcta."}
@@ -138,7 +151,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
         return {"mensaje": f"No existe el contexto {contexto} al que quieres integrar el documento."}
 
 
-@app.delete("/desacoplarDocumento",
+@app.delete("/quitarDocumento",
             tags=["Documentos"],
             description="Retira un documento determinado, borrando ese aprendizaje de ese contexto.",
             summary="Desacoplar Documento")
@@ -149,7 +162,7 @@ def borrar_documento(data: DeleteRequest):
     """
     try:
         # FastAPI automáticamente valida el JSON y lo convierte a un objeto DeleteRequest
-        deleted_count = contextos.borrar_documento(
+        deleted_count = funciones.borrar_documento(
             contexto=data.contexto, 
             filename=data.filename  # Acceso a los datos con .filename
         )
@@ -169,24 +182,11 @@ def chatbot(data: ChatRequest):
     print(f"Query: {data.pregunta}")
     print(f"Historial: {data.historial}")
 
-    response = query(data.pregunta, data.historial, data.contexto, data.modelo_llm)
+    response = asistente.chat(data.pregunta, data.historial, data.contexto, data.modelo_llm)
     if response:
         return {"Mensaje": response}
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
-
-@app.delete("/borrarContexto",
-            tags=["Contextos"])
-def borrar_contexto(contexto: str):
-    """
-    Endpoint para borrar una colección de ChromaDB por su nombre.
-    """
-    try:
-        delete(contexto)
-            
-        return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
-    except Exception as e:
-        return {"error": f"Error al borrar contexto: {e}"}    
 
 if __name__ == '__main__':
     import uvicorn

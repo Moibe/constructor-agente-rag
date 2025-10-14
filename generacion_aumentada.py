@@ -1,5 +1,4 @@
 import os
-import herramientas
 import operaciones_chroma
 from datetime import datetime
 from werkzeug.utils import secure_filename
@@ -57,7 +56,6 @@ def embed(file_path, nombre_contexto, current_hash):
 
         db = operaciones_chroma.obtenContexto(nombre_contexto)
         db.add_documents(chunks)
-        #db.persist()
 
         return True
 

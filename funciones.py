@@ -4,6 +4,7 @@ from typing import Dict
 from pathlib import Path
 import operaciones_chroma
 from typing import Dict, Any, List
+import globales
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
@@ -120,6 +121,16 @@ def listar_documentos(contexto: str) -> list[str]:
         print(f"Error al listar documentos: {e}")
         return []
     
+def delete_contexto(collection_name):
+    
+    CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
+
+    # 1. Conecta al cliente de ChromaDB.
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+    # 2. Usa el método delete_collection para eliminar la colección.
+    client.delete_collection(name=collection_name)
+    
 
 def borrar_documento(contexto: str, filename: str) -> int:
     """
@@ -200,6 +211,13 @@ def existe_contexto(contexto: str):
     resultados = listar_contextos()
 
     if contexto in resultados:
+        return True
+    else:
+        return False 
+    
+def existe_modelo(modelo: str): 
+
+    if modelo in globales.modelos:
         return True
     else:
         return False 
