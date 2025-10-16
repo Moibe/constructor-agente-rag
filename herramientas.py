@@ -1,6 +1,6 @@
 import hashlib
-import operaciones_chroma
-import time
+import generacion_aumentada
+
 
 def calculate_file_hash(file_path, hash_algorithm='sha256'):
     """Calcula el hash del contenido del archivo."""
@@ -21,7 +21,7 @@ def is_content_duplicate(nombre_contexto: str, file_hash: str) -> bool:
     print("Estoy en is content duplicate...")
     print("Hashtag:", file_hash)
     print("nombre contexto: ", nombre_contexto)
-    db = operaciones_chroma.obtenContexto(nombre_contexto)
+    db = generacion_aumentada.obtenContexto(nombre_contexto)
     collection = db._collection
     
     # Busca un documento que tenga este hash en su metadato 'file_hash'
@@ -40,7 +40,7 @@ def debug_check_file_hash_storage(nombre_base: str):
     Función de DEPURACIÓN: Imprime los metadatos del primer documento 
     para verificar si la clave 'file_hash' se guardó correctamente.
     """
-    db = operaciones_chroma.obtenContexto(nombre_base)
+    db = generacion_aumentada.obtenContexto(nombre_base)
     collection = db._collection
     
     # Obtener el primer documento de la colección (limit=1)

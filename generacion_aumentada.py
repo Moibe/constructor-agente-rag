@@ -60,7 +60,7 @@ def embed(file_path, nombre_contexto, current_hash):
         for chunk in chunks:
             chunk.metadata['file_hash'] = current_hash
 
-        db = operaciones_chroma.obtenContexto(nombre_contexto)
+        db = obtenContexto(nombre_contexto)
         db.add_documents(chunks)
 
         return True

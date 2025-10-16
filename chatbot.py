@@ -1,7 +1,6 @@
-#from langchain_community.llms import Ollama
 from langchain_ollama import OllamaLLM
 from langchain.prompts import PromptTemplate
-from operaciones_chroma import obtenContexto
+from generacion_aumentada import obtenContexto
 import funciones
 
 # Definir el prompt con un espacio para el historial
