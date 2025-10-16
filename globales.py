@@ -1,1 +1,1 @@
-modelos = ["phi3"]
+modelos = ["phi3", "gemma:2b", "mistral", "llama3.1"]

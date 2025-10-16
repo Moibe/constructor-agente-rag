@@ -5,7 +5,13 @@ from werkzeug.utils import secure_filename
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import UnstructuredPDFLoader
 
+import chromadb
+from langchain_ollama import OllamaEmbeddings
+from langchain_chroma import Chroma
+
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
+CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
+TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL')
 
 # Function to check if the uploaded file is allowed (only PDF files)
 def allowed_file(filename):
@@ -62,3 +68,21 @@ def embed(file_path, nombre_contexto, current_hash):
     except Exception as e:
         print(f"Error durante el proceso de embebido: {e}")
         return False
+    
+def obtenContexto(nombre_contexto): 
+
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    # Si el contexto (base) existe la carga la colección con LangChain usando el cliente
+    embedding = OllamaEmbeddings(model=TEXT_EMBEDDING_MODEL)
+    db = Chroma(
+        client=client,
+        collection_name=nombre_contexto,
+        embedding_function=embedding
+    )
+
+    if db._collection.count() > 0:
+        print(f"La colección '{nombre_contexto}' existe y tiene {db._collection.count()} documentos.")
+    else:
+        print(f"La colección '{nombre_contexto}' está vacía.")
+
+    return db

@@ -7,7 +7,7 @@ import funciones
 # Definir el prompt con un espacio para el historial
 # El historial se concatena en un solo string
 prompt = PromptTemplate(
-    template="""Eres un chatbot. Responde a la pregunta basándote en el siguiente historial y contexto.
+    template="""Eres un chatbot asistente del museo. Responde a la pregunta basándote en el siguiente historial y contexto. Si te preguntaran algo no relacionado al museo, solo contesta que tu eres un asistente especializado en el museo.
 
     Historial de la conversación:
     {history}
