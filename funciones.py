@@ -59,7 +59,7 @@ def listar_contextos_con_conteo() -> Dict[str, int]:
         print(f"Error al listar contextos con conteo: {e}")
         return {}
 
-def crear_contexto(nombre_contexto): 
+def crear_contexto(nombre_contexto, embedding_model): 
     
     client = chromadb.PersistentClient(path=CHROMA_PATH)
 
@@ -68,7 +68,7 @@ def crear_contexto(nombre_contexto):
         return {"Mensaje": f"El contexto que quieres crear: {nombre_contexto} ya existe."}
     else:
         #No existe
-        db = operaciones_chroma.crea_contexto(client, nombre_contexto)
+        db = operaciones_chroma.crea_contexto(client, nombre_contexto, embedding_model)
 
     return db
 

@@ -3,12 +3,12 @@ from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
-TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL')
+TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL') #Antes de pasarlo como parámetro se obtenia de env vars.
 
-def crea_contexto(client, nombre_contexto): 
+def crea_contexto(client, nombre_contexto, embedding_model): 
     #Básicamente crear una nueva base es lo mismo que cargarla.
 
-    embedding = OllamaEmbeddings(model=TEXT_EMBEDDING_MODEL)
+    embedding = OllamaEmbeddings(model=embedding_model)
     
     # Si no existe, LangChain la creará la primera vez que se agregue un documento
     db = Chroma(

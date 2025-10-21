@@ -55,12 +55,12 @@ def listar_contextos():
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-def crear_contexto(nombre_contexto: str):
+def crear_contexto(nombre_contexto: str, embedding_model: str):
     """
     Endpoint para crear un nueva contexto vacío para el Chatbot.
     """
     try:
-        return funciones.crear_contexto(nombre_contexto)
+        return funciones.crear_contexto(nombre_contexto, embedding_model)
     except Exception as e:
         return {"error": f"Error al crear contexto: {e}"}
     
