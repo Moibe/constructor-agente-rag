@@ -8,7 +8,9 @@ TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL') #Antes de pasarlo como 
 def crea_contexto(client, nombre_contexto, embedding_model): 
     #Básicamente crear una nueva base es lo mismo que cargarla.
 
-    embedding = OllamaEmbeddings(model=embedding_model)
+    embedding = OllamaEmbeddings(validate_model_on_init=True, model=embedding_model)
+    print("embedding creado...")
+    print(embedding)
     
     # Si no existe, LangChain la creará la primera vez que se agregue un documento
     db = Chroma(
