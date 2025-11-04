@@ -1,5 +1,5 @@
 from langchain_ollama import OllamaLLM
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from generacion_aumentada import obtenContexto
 import funciones
 
@@ -28,11 +28,13 @@ prompt = PromptTemplate(
 
 def chat(user_question: str, history: list = [], contexto: str = 'local-rag', modelo_llm: str = 'phi3'):
 
+    #Traducir el texto a inglés?
+
     #No debe de crear la colección si no existe!
     if funciones.existe_contexto(contexto):
 
         try: 
-            print("Inicializando modelo de lenguaje.")
+            print("Inicializando modelo de lenguaje: ", modelo_llm)
             if funciones.existe_modelo(modelo_llm):
                 llm = OllamaLLM(model=modelo_llm)
             else: 

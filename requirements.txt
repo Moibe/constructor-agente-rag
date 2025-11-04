@@ -2,7 +2,7 @@ chromadb
 unstructured
 langchain
 langchain-text-splitters
-
+langchain_core
 fastapi 
 langchain_community
 langchain-core
@@ -17,3 +17,8 @@ unstructured_pytesseract
 chromadb
 langchain-ollama
 langchain-chroma
+
+transformers
+torch
+sentencepiece
+sacremoses
