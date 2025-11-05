@@ -1,10 +1,9 @@
 import os
-import operaciones_chroma
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import UnstructuredPDFLoader
-
+import herramientas
 import chromadb
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
@@ -72,8 +71,20 @@ def embed(file_path, nombre_contexto, current_hash):
 def obtenContexto(nombre_contexto): 
 
     client = chromadb.PersistentClient(path=CHROMA_PATH)
-    # Si el contexto (base) existe la carga la colección con LangChain usando el cliente
-    embedding = OllamaEmbeddings(model=TEXT_EMBEDDING_MODEL)
+
+    print("Esto es el client de contexto: ", client)
+    
+    modelo_embedding_nombre = herramientas.obtener_modelo_de_embedding_de_coleccion(nombre_contexto, client)
+    print("El modelo de embedding recuperado es: ", modelo_embedding_nombre)
+    
+    if not modelo_embedding_nombre:
+        print(f"Error: No se pudo obtener el nombre del modelo de embedding para la colección '{nombre_contexto}'.")
+        # Aquí podrías devolver un error o usar un modelo de embedding por defecto
+        # si se trata de una colección recién creada o vacía.
+        return None
+
+
+    embedding = OllamaEmbeddings(model=modelo_embedding_nombre)
     db = Chroma(
         client=client,
         collection_name=nombre_contexto,

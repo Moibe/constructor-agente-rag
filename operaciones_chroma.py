@@ -5,21 +5,35 @@ from langchain_ollama import OllamaEmbeddings
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL') #Antes de pasarlo como parámetro se obtenia de env vars.
 
-def crea_contexto(client, nombre_contexto, embedding_model): 
-    #Básicamente crear una nueva base es lo mismo que cargarla.
-
-    embedding = OllamaEmbeddings(validate_model_on_init=True, model=embedding_model)
-    print("embedding creado...")
-    print(embedding)
+def crea_contexto(client, nombre_contexto, embedding_model):
     
-    # Si no existe, LangChain la creará la primera vez que se agregue un documento
+    # 1. Inicializar el Embedding
+    # Es importante inicializarlo para que LangChain lo use
+    embedding = OllamaEmbeddings(validate_model_on_init=True, model=embedding_model)
+    print(f"Embedding creado con modelo: {embedding_model}")
+
+    # 2. Definir la metadata a guardar
+    # Almacenamos el nombre del modelo bajo una clave que elegimos, por ejemplo:
+    metadata_contexto = {
+        "embedding_model_name": embedding_model, 
+        "descripcion": f"Colección para {nombre_contexto} usando Ollama."
+    }
+    
+    # 3. Crear o Cargar la Colección, guardando la Metadata
+    # LangChain la creará la primera vez si no existe.
     db = Chroma(
         client=client,
         collection_name=nombre_contexto,
-        embedding_function=embedding
+        embedding_function=embedding,
+        collection_metadata=metadata_contexto  # <--- ESTA ES LA CLAVE
     )
 
-    return {f"Contexto: {nombre_contexto} creado."}
+    # 4. (Opcional) Forzar la creación si no existe
+    # Si quieres asegurar que la metadata se escriba inmediatamente,
+    # puedes añadir un documento vacío (dummy) la primera vez que se crea.
+    # db.add_texts(["Inicio de colección"], metadatas=[{"source": "initial_creation"}])
+    
+    return {f"Contexto: {nombre_contexto} creado con modelo {embedding_model}."}
        
 
 def contexto_existe(client, contexto):

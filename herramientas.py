@@ -1,6 +1,12 @@
 import hashlib
 import generacion_aumentada
+import chromadb
+import os
+import time
+import logging
+from typing import Optional
 
+CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
 def calculate_file_hash(file_path, hash_algorithm='sha256'):
     """Calcula el hash del contenido del archivo."""
@@ -63,3 +69,27 @@ def debug_check_file_hash_storage(nombre_base: str):
         print("-------------------------------------------\n")
     else:
         print("La colección está vacía o hubo un error al obtener el documento.")
+
+def obtener_modelo_de_embedding_de_coleccion(nombre_contexto: str, client: chromadb.PersistentClient) -> str | None:
+    """
+    Recupera el nombre del modelo de embedding que guardamos en la metadata de la colección.
+    """
+    try:
+        # 1. Obtener la colección
+        collection = client.get_collection(name=nombre_contexto)
+        
+        # 2. Acceder al diccionario 'metadata' de la colección
+        metadata = collection.metadata
+        
+        # 3. Recuperar el nombre del modelo usando la clave que definimos al crearla
+        modelo_nombre = metadata.get("embedding_model_name")
+        
+        return modelo_nombre
+            
+    except ValueError as e:
+        # ChromaDB lanza ValueError si la colección no existe
+        print(f"Error: Colección '{nombre_contexto}' no encontrada. {e}")
+        return None
+    except Exception as e:
+        print(f"Error inesperado al recuperar metadata: {e}")
+        return None
