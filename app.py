@@ -2,10 +2,8 @@ import os
 import shutil
 from pathlib import Path
 from dotenv import load_dotenv
-
 from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File, HTTPException
-
 import funciones
 import chatbot as asistente
 import generacion_aumentada
@@ -183,6 +181,7 @@ def chatbot(data: ChatRequest):
     print(f"Historial: {data.historial}")
 
     response = asistente.chat(data.pregunta, data.historial, data.contexto, data.modelo_llm)
+    print("Respuesta: ", response)
     if response:
         return {"Mensaje": response}
     else:
