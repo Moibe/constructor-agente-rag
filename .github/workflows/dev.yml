@@ -1,9 +1,11 @@
 name: Mide Chatbot Dev 💵💴💶💷
 
-on:
-  push:
-    branches:
-      - dev
+# Workflow desactivado temporalmente - servidor interno no accesible desde GitHub Actions
+# Reactivar cuando se configure self-hosted runner o cuando haya acceso externo al servidor
+# on:
+#   push:
+#     branches:
+#       - dev
 jobs:
   run_pull:
     name: run pull 
