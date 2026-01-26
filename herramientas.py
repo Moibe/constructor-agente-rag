@@ -70,26 +70,45 @@ def debug_check_file_hash_storage(nombre_base: str):
     else:
         print("La colección está vacía o hubo un error al obtener el documento.")
 
-def obtener_modelo_de_embedding_de_coleccion(nombre_contexto: str, client: chromadb.PersistentClient) -> str | None:
+def obtener_modelo_de_embedding_de_coleccion(nombre_contexto: str, client: chromadb.PersistentClient) -> Optional[str]:
+    """Obtiene el nombre del modelo de embedding desde la colección.
+    
+    Intenta primero con get_settings(), luego fallback a leer del primer documento.
+    Finalmente, devuelve None si no se encuentra.
     """
-    Recupera el nombre del modelo de embedding que guardamos en la metadata de la colección.
-    """
+    logging.debug("obtener_modelo_de_embedding_de_coleccion: %s", nombre_contexto)
     try:
-        # 1. Obtener la colección
         collection = client.get_collection(name=nombre_contexto)
-        
-        # 2. Acceder al diccionario 'metadata' de la colección
-        metadata = collection.metadata
-        
-        # 3. Recuperar el nombre del modelo usando la clave que definimos al crearla
-        modelo_nombre = metadata.get("embedding_model_name")
-        
-        return modelo_nombre
-            
-    except ValueError as e:
-        # ChromaDB lanza ValueError si la colección no existe
-        print(f"Error: Colección '{nombre_contexto}' no encontrada. {e}")
-        return None
     except Exception as e:
-        print(f"Error inesperado al recuperar metadata: {e}")
+        logging.warning("No se pudo obtener la colección '%s': %s", nombre_contexto, e)
         return None
+
+    # Intenta usar get_settings()
+    if hasattr(collection, "get_settings"):
+        try:
+            settings = collection.get_settings()
+            logging.debug("Settings de la colección: %s", settings)
+            if isinstance(settings, dict):
+                modelo_nombre = settings.get('metadata', {}).get('embedding_model_name')
+                if modelo_nombre:
+                    logging.debug("Modelo obtenido de settings: %s", modelo_nombre)
+                    return modelo_nombre
+        except Exception as e:
+            logging.debug("No se pudo usar get_settings(): %s", e)
+
+    # Fallback: leer del primer documento
+    try:
+        results = collection.get(include=['metadatas'], limit=1)
+        if results and results.get('metadatas'):
+            first_meta = results['metadatas'][0] or {}
+            modelo_nombre = first_meta.get('embedding_model_name')
+            if modelo_nombre:
+                logging.debug("Modelo obtenido del primer documento: %s", modelo_nombre)
+                return modelo_nombre
+            else:
+                logging.debug("No se encontró 'embedding_model_name' en el primer documento: %s", first_meta)
+    except Exception as e:
+        logging.exception("Fallback leyendo metadatas falló para la colección '%s': %s", nombre_contexto, e)
+
+    logging.warning("No se pudo obtener el modelo de embedding para la colección '%s'", nombre_contexto)
+    return None

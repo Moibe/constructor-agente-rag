@@ -6,6 +6,7 @@ import operaciones_chroma
 from typing import Dict, List
 import globales
 import generacion_aumentada
+import herramientas
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
@@ -21,42 +22,64 @@ def listar_contextos():
 
     return resultado
 
-def listar_contextos_con_conteo() -> Dict[str, int]:
+def listar_contextos_con_conteo() -> Dict[str, dict]:
     """
-    Lista todos los contextos existentes y la cantidad de documentos 
-    únicos cargados en cada uno, utilizando listar_documentos().
+    Lista todos los contextos existentes con la cantidad de documentos 
+    únicos cargados y el modelo de embedding de cada uno.
     
     Returns:
-        Un diccionario en formato {nombre_coleccion: cantidad_documentos_unicos}.
+        Un diccionario en formato {nombre_coleccion: {"documentos": int, "embedding_model": str}}.
     """
     try:
         # 1. Conecta al cliente persistente de ChromaDB.
         client = chromadb.PersistentClient(path=CHROMA_PATH)
         contextos_existentes = client.list_collections()
+        print(f"Contextos encontrados: {[c.name for c in contextos_existentes]}")
         
-        conteo_por_contexto: Dict[str, int] = {}
+        conteo_por_contexto: Dict[str, dict] = {}
 
         # 2. Iterar sobre las colecciones
         for collection_object in contextos_existentes:
             nombre_contexto = collection_object.name
             
-            # 3. Llamar a la función existente: listar_documentos
-            # Esta función devuelve una lista[str] de nombres únicos o un mensaje de error (str).
-            resultado_listado = listar_documentos(nombre_contexto)
-            
-            # 4. Manejar el resultado
-            if isinstance(resultado_listado, List):
-                # Si es una lista (de nombres únicos), contamos su longitud
-                cantidad_documentos_unicos = len(resultado_listado)
-                conteo_por_contexto[nombre_contexto] = cantidad_documentos_unicos
-            else:
-                # Si es un mensaje de error (como "La base está vacía."), el conteo es 0.
-                conteo_por_contexto[nombre_contexto] = 0
+            try:
+                # 3. Obtener el modelo de embedding para este contexto
+                modelo_embedding = herramientas.obtener_modelo_de_embedding_de_coleccion(nombre_contexto, client)
+                if not modelo_embedding:
+                    modelo_embedding = os.getenv('TEXT_EMBEDDING_MODEL', 'desconocido')
+                
+                # 4. Llamar a la función existente: listar_documentos
+                # Esta función devuelve una lista[str] de nombres únicos o un mensaje de error (str).
+                resultado_listado = listar_documentos(nombre_contexto)
+                
+                # 5. Manejar el resultado
+                if isinstance(resultado_listado, List):
+                    # Si es una lista (de nombres únicos), contamos su longitud
+                    cantidad_documentos_unicos = len(resultado_listado)
+                else:
+                    # Si es un mensaje de error (como "La base está vacía."), el conteo es 0.
+                    cantidad_documentos_unicos = 0
+                
+                # 6. Guardar conteo y modelo en el resultado
+                conteo_por_contexto[nombre_contexto] = {
+                    "documentos": cantidad_documentos_unicos,
+                    "embedding_model": modelo_embedding
+                }
+                print(f"Contexto '{nombre_contexto}': {cantidad_documentos_unicos} docs, modelo: {modelo_embedding}")
+            except Exception as e:
+                print(f"Error procesando contexto '{nombre_contexto}': {e}")
+                # Incluir el contexto con valores por defecto si hay error
+                conteo_por_contexto[nombre_contexto] = {
+                    "documentos": 0,
+                    "embedding_model": "error"
+                }
 
         return conteo_por_contexto
 
     except Exception as e:
         print(f"Error al listar contextos con conteo: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 def crear_contexto(nombre_contexto, embedding_model): 

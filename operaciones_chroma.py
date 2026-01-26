@@ -28,10 +28,21 @@ def crea_contexto(client, nombre_contexto, embedding_model):
         collection_metadata=metadata_contexto  # <--- ESTA ES LA CLAVE
     )
 
-    # 4. (Opcional) Forzar la creación si no existe
-    # Si quieres asegurar que la metadata se escriba inmediatamente,
-    # puedes añadir un documento vacío (dummy) la primera vez que se crea.
-    # db.add_texts(["Inicio de colección"], metadatas=[{"source": "initial_creation"}])
+    # 4. Guardar el modelo de embedding en un documento dummy al crear la colección
+    # Esto asegura que aunque get_settings() no funcione, podamos recuperar el modelo
+    # desde el primer documento usando las metadatas.
+    if db._collection.count() == 0:
+        # Solo si la colección está vacía (es nueva)
+        print(f"Añadiendo documento inicial para guardar el modelo {embedding_model}...")
+        db.add_texts(
+            ["[CONTEXTO_INICIAL]"],
+            metadatas=[{
+                "source": "initial_creation",
+                "embedding_model_name": embedding_model,
+                "tipo": "metadata_storage"
+            }]
+        )
+        print(f"Documento inicial creado para la colección '{nombre_contexto}'")
     
     return {f"Contexto: {nombre_contexto} creado con modelo {embedding_model}."}
        

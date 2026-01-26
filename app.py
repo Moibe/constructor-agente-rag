@@ -120,7 +120,6 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
     file_path = os.path.join(TEMP_FOLDER, documento.filename)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(documento.file, buffer)
-
     
     if funciones.existe_contexto(contexto):
 
