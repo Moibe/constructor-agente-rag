@@ -12,23 +12,24 @@ jobs:
     steps:
       - name: install ssh keys
         run: |
-          # 1. Crear el directorio SSH y configurar el acceso a GitHub.com
-            #   mkdir -p ~/.ssh
-            #   echo "Host github.com" >> ~/.ssh/config
-            #   echo "  Hostname ssh.github.com" >> ~/.ssh/config
-            #   echo "  Port 443" >> ~/.ssh/config
-            #   echo "  User git" >> ~/.ssh/config
-            #   chmod 600 ~/.ssh/config
-
-            #   echo "--- Contenido del archivo ~/.ssh/config ---"
-            #   cat ~/.ssh/config
-            #   echo "--- Fin del contenido ---"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           
-          # 2. Configurar la clave SSH para la conexión al servidor
-          install -m 600 -D /dev/null ~/.ssh/id_rsa
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          #chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+          # Usar printf en lugar de echo para mejor manejo de saltos de línea
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Debug: verificar que la clave se escribió
+          echo "SSH key tamaño: $(wc -c < ~/.ssh/id_rsa) bytes"
+          echo "Primeras líneas:"
+          head -3 ~/.ssh/id_rsa
+          
+          # Agregar el servidor a known_hosts
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          chmod 600 ~/.ssh/known_hosts
+          
+          echo "known_hosts:"
+          cat ~/.ssh/known_hosts
           
       - name: connect and pull
         run: | 
