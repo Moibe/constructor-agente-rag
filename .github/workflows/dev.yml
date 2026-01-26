@@ -23,13 +23,21 @@ jobs:
           echo "SSH key tamaño: $(wc -c < ~/.ssh/id_rsa) bytes"
           echo "Primeras líneas:"
           head -3 ~/.ssh/id_rsa
+          echo "Últimas líneas:"
+          tail -2 ~/.ssh/id_rsa
           
           # Agregar el servidor a known_hosts (con el puerto correcto)
-          ssh-keyscan -p 11725 -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "Escaneando servidor en puerto 11725..."
+          ssh-keyscan -p 11725 -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>&1 || echo "⚠️ ssh-keyscan falló"
           chmod 600 ~/.ssh/known_hosts
           
           echo "known_hosts:"
           cat ~/.ssh/known_hosts
+          
+      - name: test ssh connection
+        run: |
+          echo "Intentando conexión SSH..."
+          ssh -v -p 11725 ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "whoami"
           
       - name: connect and pull
         run: | 
