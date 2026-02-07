@@ -5,7 +5,7 @@ from langchain_ollama import OllamaEmbeddings
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL') #Antes de pasarlo como parámetro se obtenia de env vars.
 
-def crea_contexto(client, nombre_contexto, embedding_model):
+def crea_contexto(client, nombre_contexto, embedding_model, chunk_size=7500):
     
     # 1. Inicializar el Embedding
     # Es importante inicializarlo para que LangChain lo use
@@ -15,7 +15,8 @@ def crea_contexto(client, nombre_contexto, embedding_model):
     # 2. Definir la metadata a guardar
     # Almacenamos el nombre del modelo bajo una clave que elegimos, por ejemplo:
     metadata_contexto = {
-        "embedding_model_name": embedding_model, 
+        "embedding_model_name": embedding_model,
+        "chunk_size": chunk_size,
         "descripcion": f"Colección para {nombre_contexto} usando Ollama."
     }
     
@@ -28,22 +29,6 @@ def crea_contexto(client, nombre_contexto, embedding_model):
         collection_metadata=metadata_contexto  # <--- ESTA ES LA CLAVE
     )
 
-    # 4. Guardar el modelo de embedding en un documento dummy al crear la colección
-    # Esto asegura que aunque get_settings() no funcione, podamos recuperar el modelo
-    # desde el primer documento usando las metadatas.
-    if db._collection.count() == 0:
-        # Solo si la colección está vacía (es nueva)
-        print(f"Añadiendo documento inicial para guardar el modelo {embedding_model}...")
-        db.add_texts(
-            ["[CONTEXTO_INICIAL]"],
-            metadatas=[{
-                "source": "initial_creation",
-                "embedding_model_name": embedding_model,
-                "tipo": "metadata_storage"
-            }]
-        )
-        print(f"Documento inicial creado para la colección '{nombre_contexto}'")
-    
     return {f"Contexto: {nombre_contexto} creado con modelo {embedding_model}."}
        
 

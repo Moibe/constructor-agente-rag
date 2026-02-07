@@ -13,6 +13,23 @@ import herramientas
 # Cargar variables de entorno
 load_dotenv()
 
+print("="*60, flush=True)
+print("🚀 APP.PY CARGADO - Si ves esto, el código está actualizado", flush=True)
+print("="*60, flush=True)
+
+# Crear archivo de log para debugging
+import logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('debug_mide.log', mode='w'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("🚀 Logger inicializado correctamente")
+
 app = FastAPI(
     title="Chatbot - Mide",
     description="Operaciones generales de chatbot incluídas la creación de contextos, carga de documentos e interacción con chatbot.",
@@ -53,12 +70,12 @@ def listar_contextos():
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-def crear_contexto(nombre_contexto: str, embedding_model: str):
+def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size: int = 7500):
     """
     Endpoint para crear un nueva contexto vacío para el Chatbot.
     """
     try:
-        return funciones.crear_contexto(nombre_contexto, embedding_model)
+        return funciones.crear_contexto(nombre_contexto, embedding_model, chunk_size)
     except Exception as e:
         return {"error": f"Error al crear contexto: {e}"}
     
@@ -121,26 +138,52 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(documento.file, buffer)
     
+    logger.info("="*60)
+    logger.info(f"📥 ENDPOINT /integrarDocumento recibido")
+    logger.info(f"📂 Contexto: {contexto}")
+    logger.info(f"📄 Archivo: {documento.filename}")
+    logger.info("="*60)
+    
+    print("="*60, flush=True)
+    print(f"📥 ENDPOINT /integrarDocumento recibido", flush=True)
+    print(f"📂 Contexto: {contexto}", flush=True)
+    print(f"📄 Archivo: {documento.filename}", flush=True)
+    print("="*60, flush=True)
+    
     if funciones.existe_contexto(contexto):
+        logger.info(f"✅ Contexto '{contexto}' existe")
+        print(f"✅ Contexto '{contexto}' existe", flush=True)
 
         #REVISIÓN DE EXISTENCIA PREVIA DE ESOS VECTORES PARA EVITAR DUPLICIDAD
         # 1. Calcular el hash del archivo subido
         current_hash = herramientas.calculate_file_hash(file_path)
-        print("El current hash obtenido es: ", current_hash)
+        print(f"🔑 Hash calculado: {current_hash}", flush=True)
 
         # 2. Verificar si el contenido ya fue subido
         if herramientas.is_content_duplicate(contexto, current_hash):
-            print(f"El archivo {file_path} ya existe en la colección (Hash: {current_hash}). Saltando el embebido.")
-            return {"mensaje": "Éste documento ya había sido integrado previamente."} # Ya está embebido, lo tratamos como éxito.
+            print(f"⚠️ El archivo {file_path} ya existe en la colección. Saltando.", flush=True)
+            return {"mensaje": "Éste documento ya había sido integrado previamente."}
 
         try:
-            embedded = generacion_aumentada.embed(file_path, contexto, current_hash)
-            if embedded:
+            print(f"🚀 Llamando a generacion_aumentada.embed()...", flush=True)
+            resultado = generacion_aumentada.embed(file_path, contexto, current_hash)
+            print(f"📊 Resultado de embed(): {resultado}", flush=True)
+            
+            if resultado['success']:
                 print("Documento integrado exitosamente..")
-                return {"mensaje": "Integración correcta."}
+                return {"mensaje": resultado['message']}
             else:
-                print("Error al embeber archivo...")
-                raise HTTPException(status_code=500, detail="Error al integrar el documento.")
+                print(f"Error al embeber archivo: {resultado['message']}")
+                error_detail = f"{resultado['message']}"
+                if 'error_details' in resultado:
+                    error_detail += f" | Detalles: {resultado['error_details']}"
+                raise HTTPException(status_code=500, detail=error_detail)
+        except HTTPException:
+            # Re-lanzar HTTPException sin modificar
+            raise
+        except Exception as e:
+            print(f"Excepción no manejada en integrar_documento: {e}")
+            raise HTTPException(status_code=500, detail=f"Error inesperado: {str(e)}")
         finally:
             # Eliminar el archivo temporal
             os.remove(file_path)

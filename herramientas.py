@@ -8,6 +8,34 @@ from typing import Optional
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
+def obtener_chunk_size_de_coleccion(nombre_contexto: str) -> int:
+    """
+    Obtiene el chunk_size asociado a un contexto/colección desde collection_metadata.
+    Si no encuentra, retorna 7500 como default.
+    """
+    try:
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        collection = client.get_collection(name=nombre_contexto)
+        
+        # Obtener desde collection metadata
+        try:
+            # Intentar obtener metadata de la colección
+            metadata = collection.metadata
+            if metadata and 'chunk_size' in metadata:
+                chunk_size = int(metadata['chunk_size'])
+                logging.info(f"Chunk size obtenido desde metadata de colección: {chunk_size}")
+                return chunk_size
+        except Exception as e:
+            logging.warning(f"No se pudo obtener metadata de colección para {nombre_contexto}: {e}")
+        
+        # Fallback final
+        logging.warning(f"No se pudo obtener chunk_size para {nombre_contexto}, usando default 7500")
+        return 7500
+        
+    except Exception as e:
+        logging.error(f"Error completo al obtener chunk_size de {nombre_contexto}: {e}")
+        return 7500
+
 def calculate_file_hash(file_path, hash_algorithm='sha256'):
     """Calcula el hash del contenido del archivo."""
     hasher = hashlib.new(hash_algorithm)
@@ -23,12 +51,18 @@ def calculate_file_hash(file_path, hash_algorithm='sha256'):
 
 def is_content_duplicate(nombre_contexto: str, file_hash: str) -> bool:
     """Verifica si un hash de contenido ya existe en la colección."""
-
-    print("Estoy en is content duplicate...")
-    print("Hashtag:", file_hash)
-    print("nombre contexto: ", nombre_contexto)
+    print("="*50, flush=True)
+    print(f"🔍 is_content_duplicate() - Verificando duplicado...", flush=True)
+    print(f"📂 Contexto: {nombre_contexto}", flush=True)
+    print(f"🔑 Hash: {file_hash}", flush=True)
+    print("="*50, flush=True)
+    
+    print("🔄 Llamando a obtenContexto()...", flush=True)
     db = generacion_aumentada.obtenContexto(nombre_contexto)
+    print(f"✅ obtenContexto() retornó: {db}", flush=True)
+    
     collection = db._collection
+    print(f"📊 Colección obtenida, buscando hash...", flush=True)
     
     # Busca un documento que tenga este hash en su metadato 'file_hash'
     results = collection.get(
@@ -83,32 +117,17 @@ def obtener_modelo_de_embedding_de_coleccion(nombre_contexto: str, client: chrom
         logging.warning("No se pudo obtener la colección '%s': %s", nombre_contexto, e)
         return None
 
-    # Intenta usar get_settings()
-    if hasattr(collection, "get_settings"):
-        try:
-            settings = collection.get_settings()
-            logging.debug("Settings de la colección: %s", settings)
-            if isinstance(settings, dict):
-                modelo_nombre = settings.get('metadata', {}).get('embedding_model_name')
-                if modelo_nombre:
-                    logging.debug("Modelo obtenido de settings: %s", modelo_nombre)
-                    return modelo_nombre
-        except Exception as e:
-            logging.debug("No se pudo usar get_settings(): %s", e)
-
-    # Fallback: leer del primer documento
+    # Obtener desde collection metadata
     try:
-        results = collection.get(include=['metadatas'], limit=1)
-        if results and results.get('metadatas'):
-            first_meta = results['metadatas'][0] or {}
-            modelo_nombre = first_meta.get('embedding_model_name')
-            if modelo_nombre:
-                logging.debug("Modelo obtenido del primer documento: %s", modelo_nombre)
-                return modelo_nombre
-            else:
-                logging.debug("No se encontró 'embedding_model_name' en el primer documento: %s", first_meta)
+        metadata = collection.metadata
+        if metadata and 'embedding_model_name' in metadata:
+            modelo_nombre = metadata['embedding_model_name']
+            logging.debug("Modelo obtenido de metadata de colección: %s", modelo_nombre)
+            return modelo_nombre
+        else:
+            logging.debug("No se encontró 'embedding_model_name' en metadata de colección")
     except Exception as e:
-        logging.exception("Fallback leyendo metadatas falló para la colección '%s': %s", nombre_contexto, e)
+        logging.exception("Error obteniendo metadata de colección '%s': %s", nombre_contexto, e)
 
     logging.warning("No se pudo obtener el modelo de embedding para la colección '%s'", nombre_contexto)
     return None
