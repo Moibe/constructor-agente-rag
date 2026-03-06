@@ -1,15 +1,14 @@
 import os
 from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
+import herramientas
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL') #Antes de pasarlo como parámetro se obtenia de env vars.
 
 def crea_contexto(client, nombre_contexto, embedding_model, chunk_size=7500):
     
-    # 1. Inicializar el Embedding
-    # Es importante inicializarlo para que LangChain lo use
-    embedding = OllamaEmbeddings(validate_model_on_init=True, model=embedding_model)
+    # 1. Inicializar el Embedding (detecta automáticamente si es OpenAI u Ollama)
+    embedding = herramientas.obtener_embedding_function(embedding_model)
     print(f"Embedding creado con modelo: {embedding_model}")
 
     # 2. Definir la metadata a guardar
@@ -17,7 +16,7 @@ def crea_contexto(client, nombre_contexto, embedding_model, chunk_size=7500):
     metadata_contexto = {
         "embedding_model_name": embedding_model,
         "chunk_size": chunk_size,
-        "descripcion": f"Colección para {nombre_contexto} usando Ollama."
+        "descripcion": f"Colección para {nombre_contexto}."
     }
     
     # 3. Crear o Cargar la Colección, guardando la Metadata

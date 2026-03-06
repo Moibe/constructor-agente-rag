@@ -16,6 +16,7 @@ unstructured_pytesseract
 
 chromadb
 langchain-ollama
+langchain-openai
 langchain-chroma
 
 transformers

@@ -6,7 +6,38 @@ import time
 import logging
 from typing import Optional
 
+# Modelos de OpenAI para embeddings
+OPENAI_EMBEDDING_MODELS = [
+    "text-embedding-3-small",
+    "text-embedding-3-large", 
+    "text-embedding-ada-002"
+]
+
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
+
+
+def es_modelo_openai(nombre_modelo: str) -> bool:
+    """
+    Determina si un modelo de embedding es de OpenAI.
+    """
+    return nombre_modelo in OPENAI_EMBEDDING_MODELS
+
+
+def obtener_embedding_function(nombre_modelo: str):
+    """
+    Factory que devuelve la función de embedding correcta según el proveedor.
+    - Si el modelo es de OpenAI → OpenAIEmbeddings
+    - Si no → OllamaEmbeddings
+    """
+    if es_modelo_openai(nombre_modelo):
+        from langchain_openai import OpenAIEmbeddings
+        logging.info(f"Usando OpenAIEmbeddings para modelo: {nombre_modelo}")
+        return OpenAIEmbeddings(model=nombre_modelo)
+    else:
+        from langchain_ollama import OllamaEmbeddings
+        logging.info(f"Usando OllamaEmbeddings para modelo: {nombre_modelo}")
+        return OllamaEmbeddings(model=nombre_modelo)
+
 
 def obtener_chunk_size_de_coleccion(nombre_contexto: str) -> int:
     """

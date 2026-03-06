@@ -5,7 +5,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import UnstructuredPDFLoader
 import herramientas
 import chromadb
-from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
 
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
@@ -171,9 +170,9 @@ def obtenContexto(nombre_contexto):
             return None
         print(f"⚠️ Usando modelo por defecto: {modelo_embedding_nombre}", flush=True)
 
-    print(f"🔗 Creando OllamaEmbeddings con modelo: {modelo_embedding_nombre}...", flush=True)
-    embedding = OllamaEmbeddings(model=modelo_embedding_nombre)
-    print(f"✅ OllamaEmbeddings creado", flush=True)
+    print(f"🔗 Creando embedding con modelo: {modelo_embedding_nombre}...", flush=True)
+    embedding = herramientas.obtener_embedding_function(modelo_embedding_nombre)
+    print(f"✅ Embedding creado", flush=True)
     
     print(f"📊 Creando objeto Chroma para colección '{nombre_contexto}'...", flush=True)
     db = Chroma(
