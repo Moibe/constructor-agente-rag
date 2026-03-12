@@ -1,8 +1,11 @@
 import os
 import shutil
+import sqlite3
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
 import funciones
 import chatbot as asistente
@@ -14,7 +17,7 @@ import herramientas
 load_dotenv()
 
 print("="*60, flush=True)
-print("🚀 APP.PY CARGADO - Si ves esto, el código está actualizado", flush=True)
+print("[INICIO] APP.PY CARGADO - Si ves esto, el codigo esta actualizado", flush=True)
 print("="*60, flush=True)
 
 # Crear archivo de log para debugging
@@ -28,7 +31,30 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-logger.info("🚀 Logger inicializado correctamente")
+logger.info("[OK] Logger inicializado correctamente")
+
+# Inicializar base de datos SQLite para logs
+LOG_DB_PATH = os.getenv('LOG_DB_PATH', 'logs.db')
+
+def init_log_db():
+    conn = sqlite3.connect(LOG_DB_PATH)
+    conn.execute('''CREATE TABLE IF NOT EXISTS chat_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT,
+        sesion TEXT,
+        ambiente TEXT,
+        modelo TEXT,
+        contexto TEXT,
+        pregunta TEXT,
+        historial TEXT,
+        respuesta TEXT,
+        ms INTEGER,
+        error TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+init_log_db()
 
 app = FastAPI(
     title="Chatbot - Mide",
@@ -55,6 +81,18 @@ class DeleteRequest(BaseModel):
     """
     contexto: str = None 
     filename: str
+
+class LogRequest(BaseModel):
+    fecha: str
+    sesion: str
+    ambiente: str
+    modelo: str
+    contexto: str
+    pregunta: str
+    historial: str
+    respuesta: str
+    ms: int
+    error: Optional[str] = None
 
 @app.get("/listarContextos",
          tags=["Contextos"])
@@ -139,35 +177,35 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
         shutil.copyfileobj(documento.file, buffer)
     
     logger.info("="*60)
-    logger.info(f"📥 ENDPOINT /integrarDocumento recibido")
-    logger.info(f"📂 Contexto: {contexto}")
-    logger.info(f"📄 Archivo: {documento.filename}")
+    logger.info(f"[IN] ENDPOINT /integrarDocumento recibido")
+    logger.info(f"[*] Contexto: {contexto}")
+    logger.info(f"[*] Archivo: {documento.filename}")
     logger.info("="*60)
     
     print("="*60, flush=True)
-    print(f"📥 ENDPOINT /integrarDocumento recibido", flush=True)
-    print(f"📂 Contexto: {contexto}", flush=True)
-    print(f"📄 Archivo: {documento.filename}", flush=True)
+    print(f"[IN] ENDPOINT /integrarDocumento recibido", flush=True)
+    print(f"[*] Contexto: {contexto}", flush=True)
+    print(f"[*] Archivo: {documento.filename}", flush=True)
     print("="*60, flush=True)
     
     if funciones.existe_contexto(contexto):
-        logger.info(f"✅ Contexto '{contexto}' existe")
-        print(f"✅ Contexto '{contexto}' existe", flush=True)
+        logger.info(f"[OK] Contexto '{contexto}' existe")
+        print(f"[OK] Contexto '{contexto}' existe", flush=True)
 
         #REVISIÓN DE EXISTENCIA PREVIA DE ESOS VECTORES PARA EVITAR DUPLICIDAD
         # 1. Calcular el hash del archivo subido
         current_hash = herramientas.calculate_file_hash(file_path)
-        print(f"🔑 Hash calculado: {current_hash}", flush=True)
+        print(f"[*] Hash calculado: {current_hash}", flush=True)
 
         # 2. Verificar si el contenido ya fue subido
         if herramientas.is_content_duplicate(contexto, current_hash):
-            print(f"⚠️ El archivo {file_path} ya existe en la colección. Saltando.", flush=True)
+            print(f"[AVISO] El archivo {file_path} ya existe en la coleccion. Saltando.", flush=True)
             return {"mensaje": "Éste documento ya había sido integrado previamente."}
 
         try:
-            print(f"🚀 Llamando a generacion_aumentada.embed()...", flush=True)
+            print(f"[...] Llamando a generacion_aumentada.embed()...", flush=True)
             resultado = generacion_aumentada.embed(file_path, contexto, current_hash)
-            print(f"📊 Resultado de embed(): {resultado}", flush=True)
+            print(f"[*] Resultado de embed(): {resultado}", flush=True)
             
             if resultado['success']:
                 print("Documento integrado exitosamente..")
@@ -228,6 +266,26 @@ def chatbot(data: ChatRequest):
         return {"Mensaje": response}
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
+
+@app.post("/registrarLog",
+          tags=["Logs"],
+          description="Registra un log de conversación en la base de datos SQLite.",
+          summary="Registrar Log")
+def registrar_log(data: LogRequest):
+    try:
+        conn = sqlite3.connect(LOG_DB_PATH)
+        conn.execute(
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (data.fecha, data.sesion, data.ambiente, data.modelo, data.contexto,
+             data.pregunta, data.historial, data.respuesta, data.ms, data.error)
+        )
+        conn.commit()
+        conn.close()
+        print(f"[OK] Log registrado para sesion: {data.sesion}")
+        return {"Mensaje": "Log registrado correctamente."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al registrar log: {e}")
 
 if __name__ == '__main__':
     import uvicorn

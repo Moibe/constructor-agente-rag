@@ -20,9 +20,9 @@ try:
     print()
     
     if len(contextos) == 0:
-        print("✅ SÍ, TODO ESTÁ VACÍO - No hay colecciones")
+        print("[OK] SI, TODO ESTA VACIO - No hay colecciones")
     else:
-        print("⚠️  AÚN HAY COLECCIONES:")
+        print("[AVISO] AUN HAY COLECCIONES:")
         print("-" * 60)
         
         total_documentos = 0
@@ -33,11 +33,11 @@ try:
             print(f"    └─ Documentos: {count}")
         
         print("-" * 60)
-        print(f"\n📊 TOTALES:")
+        print(f"\n[TOTALES]")
         print(f"   Colecciones: {len(contextos)}")
         print(f"   Documentos totales: {total_documentos}")
         
 except Exception as e:
-    print(f"❌ Error al acceder a ChromaDB: {e}")
+    print(f"[ERROR] Error al acceder a ChromaDB: {e}")
     import traceback
     traceback.print_exc()

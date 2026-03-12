@@ -83,17 +83,17 @@ def calculate_file_hash(file_path, hash_algorithm='sha256'):
 def is_content_duplicate(nombre_contexto: str, file_hash: str) -> bool:
     """Verifica si un hash de contenido ya existe en la colección."""
     print("="*50, flush=True)
-    print(f"🔍 is_content_duplicate() - Verificando duplicado...", flush=True)
-    print(f"📂 Contexto: {nombre_contexto}", flush=True)
-    print(f"🔑 Hash: {file_hash}", flush=True)
+    print(f"[...] is_content_duplicate() - Verificando duplicado...", flush=True)
+    print(f"[*] Contexto: {nombre_contexto}", flush=True)
+    print(f"[*] Hash: {file_hash}", flush=True)
     print("="*50, flush=True)
     
-    print("🔄 Llamando a obtenContexto()...", flush=True)
+    print("[...] Llamando a obtenContexto()...", flush=True)
     db = generacion_aumentada.obtenContexto(nombre_contexto)
-    print(f"✅ obtenContexto() retornó: {db}", flush=True)
+    print(f"[OK] obtenContexto() retorno: {db}", flush=True)
     
     collection = db._collection
-    print(f"📊 Colección obtenida, buscando hash...", flush=True)
+    print(f"[*] Coleccion obtenida, buscando hash...", flush=True)
     
     # Busca un documento que tenga este hash en su metadato 'file_hash'
     results = collection.get(

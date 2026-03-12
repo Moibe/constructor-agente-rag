@@ -201,7 +201,7 @@ def borrar_documento(contexto: str, filename: str) -> int:
         
         # DEBUG: Ver todos los 'source' que existen en la colección
         if preview_count == 0:
-            print("\n⚠️ NO ENCONTRÓ DOCUMENTOS CON ESE SOURCE")
+            print("\n[AVISO] NO ENCONTRO DOCUMENTOS CON ESE SOURCE")
             print("Mostrando todos los sources en la colección:")
             all_docs = collection.get(
                 include=['metadatas'],
