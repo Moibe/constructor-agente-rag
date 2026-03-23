@@ -310,7 +310,7 @@ async def listar_modelos():
 
 @app.get("/infoModelo/{modelo:path}",
          tags=["Modelos"],
-         description="Retorna los detalles de un modelo de Ollama (arquitectura, familia, parámetros, etc.).",
+         description="Retorna los detalles de un modelo de Ollama (arquitectura, parámetros, etc.).",
          summary="Info de Modelo")
 async def info_modelo(modelo: str):
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
@@ -324,10 +324,10 @@ async def info_modelo(modelo: str):
             info = data.get("model_info", {})
             return {
                 "modelo": modelo,
-                "familia":      info.get("general.architecture", "desconocida"),
-                "parametros":   info.get("general.parameter_count", "desconocido"),
-                "contexto_max": info.get(f"{info.get('general.architecture', '')}.context_length", "desconocido"),
-                "tipo":         "embedding" if "embed" in modelo.lower() else "llm",
+                "arquitectura":  info.get("general.architecture", "desconocida"),
+                "parametros":    info.get("general.parameter_count", "desconocido"),
+                "contexto_max":  info.get(f"{info.get('general.architecture', '')}.context_length", "desconocido"),
+                "tipo":          "embedding" if "embed" in modelo.lower() else "llm",
             }
     except HTTPException:
         raise
