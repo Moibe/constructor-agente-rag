@@ -336,6 +336,13 @@ async def info_modelo(modelo: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar info del modelo: {e}")
 
+@app.get("/health",
+         tags=["Utilidad"],
+         description="Verifica que el servidor esté en línea.",
+         summary="Health Check")
+def health():
+    return {"status": "ok", "mensaje": "Servidor en línea"}
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
