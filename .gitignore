@@ -3,3 +3,5 @@
 /__pycache__/
 /_temp/
 hooks.json
+debug_mide.log*
+logs.db*

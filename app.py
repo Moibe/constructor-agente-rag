@@ -2,6 +2,8 @@ import os
 import shutil
 import sqlite3
 import json
+import asyncio
+import httpx
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -22,11 +24,13 @@ print("="*60, flush=True)
 
 # Crear archivo de log para debugging
 import logging
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('debug_mide.log', mode='w'),
+        RotatingFileHandler('debug_mide.log', maxBytes=10*1024*1024, backupCount=3),
         logging.StreamHandler()
     ]
 )
@@ -204,7 +208,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
 
         try:
             print(f"[...] Llamando a generacion_aumentada.embed()...", flush=True)
-            resultado = generacion_aumentada.embed(file_path, contexto, current_hash)
+            resultado = await asyncio.to_thread(generacion_aumentada.embed, file_path, contexto, current_hash)
             print(f"[*] Resultado de embed(): {resultado}", flush=True)
             
             if resultado['success']:
@@ -286,6 +290,51 @@ def registrar_log(data: LogRequest):
         return {"Mensaje": "Log registrado correctamente."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al registrar log: {e}")
+
+@app.get("/listarModelos",
+         tags=["Modelos"],
+         description="Consulta Ollama y retorna la lista de modelos descargados localmente.",
+         summary="Listar Modelos")
+async def listar_modelos():
+    OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+            response.raise_for_status()
+            modelos = [m['name'] for m in response.json().get('models', [])]
+            return {"modelos": modelos}
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar a Ollama: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al consultar Ollama: {e}")
+
+@app.get("/infoModelo/{modelo:path}",
+         tags=["Modelos"],
+         description="Retorna los detalles de un modelo de Ollama (arquitectura, familia, parámetros, etc.).",
+         summary="Info de Modelo")
+async def info_modelo(modelo: str):
+    OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{OLLAMA_URL}/api/show", json={"name": modelo}, timeout=10)
+            if response.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Modelo '{modelo}' no encontrado en Ollama.")
+            response.raise_for_status()
+            data = response.json()
+            info = data.get("model_info", {})
+            return {
+                "modelo": modelo,
+                "familia":      info.get("general.architecture", "desconocida"),
+                "parametros":   info.get("general.parameter_count", "desconocido"),
+                "contexto_max": info.get(f"{info.get('general.architecture', '')}.context_length", "desconocido"),
+                "tipo":         "embedding" if "embed" in modelo.lower() else "llm",
+            }
+    except HTTPException:
+        raise
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar a Ollama: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al consultar info del modelo: {e}")
 
 if __name__ == '__main__':
     import uvicorn
