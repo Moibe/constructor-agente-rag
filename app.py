@@ -146,19 +146,24 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size:
                 context_window = 8191
 
         # 2. Validar chunk_size basado en la ventana de contexto del modelo
+        # El chunk_size está en CARACTERES. Convertimos la ventana (en tokens)
+        # a un límite aproximado en caracteres usando un factor conservador (3x).
         CHUNK_SIZE_MIN = 100
-        CHUNK_SIZE_MAX = context_window
+        CHUNK_SIZE_MAX = int(context_window * 3)
 
         if chunk_size < CHUNK_SIZE_MIN:
             raise HTTPException(
                 status_code=400,
-                detail=f"El tamaño del chunk ({chunk_size}) es demasiado pequeño. Mínimo permitido: {CHUNK_SIZE_MIN}."
+                detail=f"El tamaño del chunk ({chunk_size}) es demasiado pequeño. Mínimo permitido: {CHUNK_SIZE_MIN} caracteres."
             )
-        
+
         if chunk_size > CHUNK_SIZE_MAX:
             raise HTTPException(
                 status_code=400,
-                detail=f"El tamaño del chunk ({chunk_size}) excede la ventana de contexto del modelo {embedding_model} ({CHUNK_SIZE_MAX})."
+                detail=(
+                    f"El tamaño del chunk ({chunk_size}) excede el máximo recomendado para el modelo '{embedding_model}': "
+                    f"{CHUNK_SIZE_MAX} caracteres (ventana de contexto {context_window} tokens × 3)."
+                )
             )
 
         return funciones.crear_contexto(nombre_contexto, embedding_model, chunk_size)
