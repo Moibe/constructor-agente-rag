@@ -117,12 +117,53 @@ def listar_contextos():
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size: int = 7500):
+async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size: int = 7500):
     """
     Endpoint para crear un nueva contexto vacío para el Chatbot.
     """
     try:
+        # 1. Obtener información del modelo desde Ollama (o definir defaults para OpenAI)
+        context_window = 4096  # Default conservador
+        
+        if not herramientas.es_modelo_openai(embedding_model):
+            OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+            async with httpx.AsyncClient() as client:
+                try:
+                    response = await client.post(f"{OLLAMA_URL}/api/show", json={"name": embedding_model}, timeout=5)
+                    if response.status_code == 200:
+                        data = response.json()
+                        info = data.get("model_info", {})
+                        # Intentar obtener el context_length de la arquitectura del modelo
+                        arch = info.get("general.architecture", "")
+                        context_window = info.get(f"{arch}.context_length") or info.get("adapter.context_length") or 4096
+                except Exception as e:
+                    logger.warning(f"No se pudo obtener info de Ollama para {embedding_model}, usando default: {e}")
+        else:
+            # Modelos de OpenAI suelen tener límites conocidos
+            if "text-embedding-3" in embedding_model:
+                context_window = 8191
+            else:
+                context_window = 8191
+
+        # 2. Validar chunk_size basado en la ventana de contexto del modelo
+        CHUNK_SIZE_MIN = 100
+        CHUNK_SIZE_MAX = context_window
+
+        if chunk_size < CHUNK_SIZE_MIN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El tamaño del chunk ({chunk_size}) es demasiado pequeño. Mínimo permitido: {CHUNK_SIZE_MIN}."
+            )
+        
+        if chunk_size > CHUNK_SIZE_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El tamaño del chunk ({chunk_size}) excede la ventana de contexto del modelo {embedding_model} ({CHUNK_SIZE_MAX})."
+            )
+
         return funciones.crear_contexto(nombre_contexto, embedding_model, chunk_size)
+    except HTTPException:
+        raise
     except Exception as e:
         return {"error": f"Error al crear contexto: {e}"}
     
