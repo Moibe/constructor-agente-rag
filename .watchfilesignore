@@ -1,0 +1,6 @@
+debug_mide.log*
+logs.db*
+chroma/
+__pycache__/
+_temp/
+*.pyc
