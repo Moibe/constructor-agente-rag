@@ -27,13 +27,18 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         RotatingFileHandler('debug_mide.log', maxBytes=10*1024*1024, backupCount=3),
         logging.StreamHandler()
     ]
 )
+
+# Evitar ruido de recarga automática en desarrollo
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 logger.info("[OK] Logger inicializado correctamente")
 
