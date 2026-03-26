@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import funciones
 import chatbot as asistente
 import generacion_aumentada
@@ -69,6 +70,20 @@ app = FastAPI(
     title="Chatbot - Mide",
     description="Operaciones generales de chatbot incluídas la creación de contextos, carga de documentos e interacción con chatbot.",
     version="0.0.0"
+)
+
+# Configurar CORS en base a variable de entorno (lista separada por comas)
+allowed_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '*')
+allowed_origins = [origin.strip() for origin in allowed_origins_env.split(',') if origin.strip()]
+if not allowed_origins:
+    allowed_origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"]
 )
 
 # Definir la carpeta temporal para los archivos y la carpeta de la base de datos vectorial
