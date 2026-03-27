@@ -388,11 +388,29 @@ async def info_modelo(modelo: str):
             response.raise_for_status()
             data = response.json()
             info = data.get("model_info", {})
+
+            arquitectura = info.get("general.architecture", "desconocida")
+            raw_context = info.get(f"{arquitectura}.context_length") or info.get("adapter.context_length")
+
+            context_window_tokens = None
+            if isinstance(raw_context, (int, float)):
+                context_window_tokens = int(raw_context)
+            elif isinstance(raw_context, str):
+                try:
+                    context_window_tokens = int(raw_context)
+                except ValueError:
+                    context_window_tokens = None
+
+            chunk_size_max = int(context_window_tokens * 3) if context_window_tokens else None
+            chunk_size_sugerido = int(chunk_size_max * 0.8) if chunk_size_max else None
+
             return {
                 "modelo": modelo,
-                "arquitectura":  info.get("general.architecture", "desconocida"),
+                "arquitectura":  arquitectura,
                 "parametros":    info.get("general.parameter_count", "desconocido"),
-                "contexto_max":  info.get(f"{info.get('general.architecture', '')}.context_length", "desconocido"),
+                "contexto_max":  raw_context or "desconocido",
+                "chunk_size_max": chunk_size_max or "desconocido",
+                "chunk_size_sugerido": chunk_size_sugerido or "desconocido",
                 "tipo":          "embedding" if "embed" in modelo.lower() else "llm",
             }
     except HTTPException:
