@@ -32,7 +32,7 @@ def load_and_split_data(file_path, chunk_size=7500, chunk_overlap=100):
     print("Subdividiendo documento...")
     
     # Load the PDF file and split the data into chunks
-    loader = UnstructuredPDFLoader(file_path=file_path, language=["eng"])
+    loader = UnstructuredPDFLoader(file_path=file_path, languages=["spa", "eng"])
     print("UnstructuredPDFLoader listo.")
     data = loader.load() #Aquí es donde me pide especificar idioma.
     print("Carga de documento completada.")

@@ -13,6 +13,17 @@ OPENAI_EMBEDDING_MODELS = [
     "text-embedding-ada-002"
 ]
 
+OPENAI_LLM_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-3.5-turbo"
+]
+
+
+def es_modelo_openai_llm(nombre_modelo: str) -> bool:
+    """Determina si un modelo LLM es de OpenAI."""
+    return nombre_modelo in OPENAI_LLM_MODELS
+
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
 

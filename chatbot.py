@@ -2,6 +2,7 @@ from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from generacion_aumentada import obtenContexto
 import funciones
+import herramientas
 
 # Definir el prompt con un espacio para el historial
 # El historial se concatena en un solo string
@@ -36,7 +37,11 @@ def chat(user_question: str, history: list = [], contexto: str = 'local-rag', mo
         try: 
             print("Inicializando modelo de lenguaje: ", modelo_llm)
             if funciones.existe_modelo(modelo_llm):
-                llm = OllamaLLM(model=modelo_llm)
+                if herramientas.es_modelo_openai_llm(modelo_llm):
+                    from langchain_openai import ChatOpenAI
+                    llm = ChatOpenAI(model=modelo_llm)
+                else:
+                    llm = OllamaLLM(model=modelo_llm)
             else: 
                 return {"Mensaje": "No existe ese modelo de lenguaje."}
         except Exception as e:
@@ -61,6 +66,9 @@ def chat(user_question: str, history: list = [], contexto: str = 'local-rag', mo
         # Genera la respuesta
         response = llm.invoke(full_prompt)
 
+        # Uniformar respuesta: ChatOpenAI devuelve AIMessage, OllamaLLM devuelve str
+        if hasattr(response, 'content'):
+            return response.content
         return response
     
     else:

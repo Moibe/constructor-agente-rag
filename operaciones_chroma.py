@@ -28,7 +28,7 @@ def crea_contexto(client, nombre_contexto, embedding_model, chunk_size=7500):
         collection_metadata=metadata_contexto  # <--- ESTA ES LA CLAVE
     )
 
-    return {f"Contexto: {nombre_contexto} creado con modelo {embedding_model}."}
+    return {"Mensaje": f"Contexto: {nombre_contexto} creado con modelo {embedding_model} y chunk_size de {chunk_size} caracteres."}
        
 
 def contexto_existe(client, contexto):

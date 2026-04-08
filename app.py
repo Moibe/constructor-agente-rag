@@ -132,9 +132,11 @@ def listar_contextos():
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size: int = 7500):
+async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size: Optional[int] = None):
     """
     Endpoint para crear un nueva contexto vacío para el Chatbot.
+    Si no se especifica chunk_size, se calcula automáticamente como el 80% del máximo
+    permitido por el modelo (context_window_tokens × 3 × 0.8).
     """
     try:
         # 1. Obtener información del modelo desde Ollama (o definir defaults para OpenAI)
@@ -145,14 +147,28 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size:
             async with httpx.AsyncClient() as client:
                 try:
                     response = await client.post(f"{OLLAMA_URL}/api/show", json={"name": embedding_model}, timeout=5)
-                    if response.status_code == 200:
-                        data = response.json()
-                        info = data.get("model_info", {})
-                        # Intentar obtener el context_length de la arquitectura del modelo
-                        arch = info.get("general.architecture", "")
-                        context_window = info.get(f"{arch}.context_length") or info.get("adapter.context_length") or 4096
-                except Exception as e:
-                    logger.warning(f"No se pudo obtener info de Ollama para {embedding_model}, usando default: {e}")
+                    if response.status_code == 404:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"El modelo de embedding '{embedding_model}' no está disponible en Ollama. Descárgalo con: ollama pull {embedding_model}"
+                        )
+                    if response.status_code != 200:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Ollama respondió con error {response.status_code} al verificar el modelo '{embedding_model}'."
+                        )
+                    data = response.json()
+                    info = data.get("model_info", {})
+                    # Intentar obtener el context_length de la arquitectura del modelo
+                    arch = info.get("general.architecture", "")
+                    context_window = info.get(f"{arch}.context_length") or info.get("adapter.context_length") or 4096
+                except HTTPException:
+                    raise
+                except httpx.RequestError:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"No se pudo conectar a Ollama para verificar el modelo '{embedding_model}'. ¿Está corriendo Ollama?"
+                    )
         else:
             # Modelos de OpenAI suelen tener límites conocidos
             if "text-embedding-3" in embedding_model:
@@ -160,11 +176,14 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size:
             else:
                 context_window = 8191
 
-        # 2. Validar chunk_size basado en la ventana de contexto del modelo
-        # El chunk_size está en CARACTERES. Convertimos la ventana (en tokens)
-        # a un límite aproximado en caracteres usando un factor conservador (3x).
+        # 2. Calcular límites en caracteres (1 token ≈ 3 caracteres, factor conservador)
         CHUNK_SIZE_MIN = 100
         CHUNK_SIZE_MAX = int(context_window * 3)
+        CHUNK_SIZE_SUGERIDO = int(CHUNK_SIZE_MAX * 0.8)
+
+        # Si no se especificó chunk_size, usar el sugerido automáticamente
+        if chunk_size is None:
+            chunk_size = CHUNK_SIZE_SUGERIDO
 
         if chunk_size < CHUNK_SIZE_MIN:
             raise HTTPException(

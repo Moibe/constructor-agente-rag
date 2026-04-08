@@ -1,1 +1,1 @@
-modelos = ["phi3", "gemma:2b", "mistral", "llama3.1"]
+modelos = ["phi3", "gemma:2b", "mistral", "llama3.1", "gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
