@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import sqlite3
 import json
@@ -46,16 +47,47 @@ logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 logger.info("[OK] Logger inicializado correctamente")
 
-# Inicializar base de datos SQLite para logs
+# Inicializar bases de datos SQLite
 LOG_DB_PATH = os.getenv('LOG_DB_PATH', 'logs.db')
+AGENTES_DB_PATH = os.getenv('AGENTES_DB_PATH', 'agentes.db')
 
-def _db_connection():
-    conn = sqlite3.connect(LOG_DB_PATH)
+_SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+
+def _agentes_connection():
+    conn = sqlite3.connect(AGENTES_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def _validate_slug(slug: str) -> str:
+    s = slug.strip() if slug else ""
+    if not _SLUG_PATTERN.match(s):
+        raise HTTPException(
+            status_code=400,
+            detail="slug inválido. Debe matchear ^[a-z][a-z0-9-]{1,63}$ (empieza con letra minúscula, lowercase + dígitos + guiones, 2-64 chars).",
+        )
+    return s
+
+def _validate_nombre(nombre: str) -> str:
+    s = nombre.strip() if nombre else ""
+    if not s:
+        raise HTTPException(status_code=400, detail="nombre no puede estar vacío.")
+    if len(s) > 80:
+        raise HTTPException(status_code=400, detail="nombre excede 80 caracteres.")
+    return s
+
+def _validate_no_empty(value: str, field_name: str) -> str:
+    s = value.strip() if value else ""
+    if not s:
+        raise HTTPException(status_code=400, detail=f"{field_name} no puede estar vacío.")
+    return s
+
+def _validate_historial_max(value: int) -> int:
+    if not isinstance(value, int) or value < 0 or value > 50:
+        raise HTTPException(status_code=400, detail="historial_max debe ser entero en rango 0-50.")
+    return value
 
 def init_log_db():
     conn = sqlite3.connect(LOG_DB_PATH)
@@ -76,19 +108,70 @@ def init_log_db():
     conn.close()
 
 def init_agentes_db():
-    conn = sqlite3.connect(LOG_DB_PATH)
+    conn = sqlite3.connect(AGENTES_DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS agentes (
-        id            TEXT PRIMARY KEY,
-        nombre        TEXT NOT NULL,
-        instrucciones TEXT NOT NULL,
-        creado_en     TEXT NOT NULL,
+        id             TEXT PRIMARY KEY,
+        slug           TEXT NOT NULL UNIQUE,
+        nombre         TEXT NOT NULL,
+        instrucciones  TEXT NOT NULL,
+        contexto       TEXT NOT NULL,
+        modelo_llm     TEXT NOT NULL,
+        historial_max  INTEGER NOT NULL DEFAULT 5,
+        creado_en      TEXT NOT NULL,
         actualizado_en TEXT NOT NULL
     )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_slug ON agentes(slug)')
     conn.commit()
     conn.close()
 
+def cleanup_legacy_agentes_in_logs_db():
+    """One-shot cleanup: drops the vestigial 'agentes' table from logs.db left
+    over from the previous PR. Tracked via _meta flag so it runs only once
+    across server restarts — protege contra restore/rollback que reintroduzca
+    la tabla sin que se evapore silenciosamente al siguiente arranque.
+
+    Si la tabla aparece con filas (caso restore desde backup), se loguea un
+    warning con el conteo antes de borrar — para que no pase desapercibido.
+    chat_logs nunca se toca."""
+    conn = sqlite3.connect(LOG_DB_PATH)
+    try:
+        conn.execute('CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)')
+
+        flag = conn.execute(
+            "SELECT value FROM _meta WHERE key='agentes_legacy_cleanup_done'"
+        ).fetchone()
+        if flag and flag[0] == 'true':
+            return
+
+        legacy_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agentes'"
+        ).fetchone()
+
+        if legacy_table is not None:
+            count = conn.execute("SELECT COUNT(*) FROM agentes").fetchone()[0]
+            if count > 0:
+                logger.warning(
+                    f"[MIGRATION] logs.db.agentes contiene {count} fila(s). "
+                    "Se borrarán por ser vestigios de una PR anterior — la fuente de "
+                    "verdad ahora es agentes.db. Si esto es inesperado (por ejemplo, "
+                    "venías de un restore), detén el servidor y respalda logs.db antes "
+                    "de reiniciar."
+                )
+            else:
+                logger.info("[MIGRATION] Borrando tabla vestigial logs.db.agentes (vacía).")
+            conn.execute('DROP TABLE IF EXISTS agentes')
+
+        conn.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+            ('agentes_legacy_cleanup_done', 'true'),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 init_log_db()
 init_agentes_db()
+cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
     title="Constructor RAG",
@@ -117,10 +200,13 @@ Path(TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
 Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
 
 class ChatRequest(BaseModel):
-    contexto: str = None 
-    modelo_llm: str
     pregunta: str
-    historial: list = []
+    historial: list[dict] = []
+    agente_id: Optional[str] = None
+    contexto: Optional[str] = None
+    modelo_llm: Optional[str] = None
+    instrucciones: Optional[str] = None
+    historial_max: Optional[int] = None
 
 class DeleteRequest(BaseModel):
     """
@@ -143,17 +229,31 @@ class LogRequest(BaseModel):
     error: Optional[str] = None
 
 class AgenteCreate(BaseModel):
+    slug: str
     nombre: str
     instrucciones: str
+    contexto: str
+    modelo_llm: str
+    historial_max: int = 5
 
 class AgenteUpdate(BaseModel):
     nombre: Optional[str] = None
     instrucciones: Optional[str] = None
+    contexto: Optional[str] = None
+    modelo_llm: Optional[str] = None
+    historial_max: Optional[int] = None
+    # Sentinels para detectar intentos de modificar campos inmutables
+    id: Optional[str] = None
+    slug: Optional[str] = None
 
 class Agente(BaseModel):
     id: str
+    slug: str
     nombre: str
     instrucciones: str
+    contexto: str
+    modelo_llm: str
+    historial_max: int
     creado_en: str
     actualizado_en: str
 
@@ -379,16 +479,56 @@ def borrar_documento(data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
+_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, creado_en, actualizado_en"
+
 @app.post("/chatbot",
           tags=["Chatbot"])
 def chatbot(data: ChatRequest):
+    # Resolver bundle del agente si viene agente_id; si no, modo legacy
+    base = {}
+    if data.agente_id is not None:
+        conn = _agentes_connection()
+        try:
+            row = conn.execute(
+                f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
+                (data.agente_id,),
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Agente {data.agente_id} no encontrado")
+            base = dict(row)
+        finally:
+            conn.close()
 
-    print(f"Modelo LLM: {data.modelo_llm}")
-    print(f"Contexto: {data.contexto}")
+    # Precedencia: override del body gana sobre bundle del agente.
+    # NOTA: el operador `or` trata "" (string vacío) como ausente, así que un override "" se
+    # pisa con el valor del bundle. Si algún día se necesita "anular" un campo del agente
+    # desde el request, distinguir None de "" explícitamente (ej. `data.contexto if data.contexto is not None else base.get("contexto")`).
+    contexto_efectivo = data.contexto or base.get("contexto")
+    modelo_efectivo = data.modelo_llm or base.get("modelo_llm")
+    instrucciones_efectivas = data.instrucciones or base.get("instrucciones")
+    # Si instrucciones_efectivas queda None, chatbot.py usa el fallback hardcoded del MIDE.
+    # TODO(historial_max): la próxima PR que consuma data.historial_max para truncar el
+    # historial DEBE validar aquí el rango (entero 0-50). Hoy se recibe sin validar
+    # porque no se usa, pero un valor fuera de rango (-5, 9999, str) pasa callando.
+
+    if not contexto_efectivo:
+        raise HTTPException(status_code=400, detail="contexto es requerido (envíalo en el body o asocia un agente con contexto).")
+    if not modelo_efectivo:
+        raise HTTPException(status_code=400, detail="modelo_llm es requerido (envíalo en el body o asocia un agente con modelo_llm).")
+
+    print(f"Modelo LLM: {modelo_efectivo}")
+    print(f"Contexto: {contexto_efectivo}")
     print(f"Query: {data.pregunta}")
     print(f"Historial: {data.historial}")
+    print(f"Agente: {data.agente_id}")
 
-    response = asistente.chat(data.pregunta, data.historial, data.contexto, data.modelo_llm)
+    response = asistente.chat(
+        data.pregunta,
+        data.historial,
+        contexto_efectivo,
+        modelo_efectivo,
+        instrucciones=instrucciones_efectivas,
+    )
     print("Respuesta: ", response)
     if response:
         return {"Mensaje": response}
@@ -400,10 +540,10 @@ def chatbot(data: ChatRequest):
          description="Lista todos los agentes configurados, ordenados por fecha de creación descendente.",
          summary="Listar Agentes")
 def listar_agentes():
-    conn = _db_connection()
+    conn = _agentes_connection()
     try:
         rows = conn.execute(
-            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes ORDER BY creado_en DESC"
+            f"SELECT {_AGENTE_COLS} FROM agentes ORDER BY creado_en DESC"
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -412,29 +552,31 @@ def listar_agentes():
 @app.post("/agentes",
           tags=["Agentes"],
           status_code=201,
-          description="Crea un nuevo agente con nombre e instrucciones (system prompt).",
+          description="Crea un agente con bundle completo (slug, nombre, instrucciones, contexto, modelo_llm, historial_max).",
           summary="Crear Agente")
 def crear_agente(body: AgenteCreate):
-    nombre = body.nombre.strip()
-    instrucciones = body.instrucciones.strip()
-    if not instrucciones:
-        raise HTTPException(status_code=400, detail="instrucciones no puede estar vacío.")
-    if not nombre:
-        raise HTTPException(status_code=400, detail="nombre no puede estar vacío.")
-    if len(nombre) > 80:
-        raise HTTPException(status_code=400, detail="nombre excede 80 caracteres.")
+    slug = _validate_slug(body.slug)
+    nombre = _validate_nombre(body.nombre)
+    instrucciones = _validate_no_empty(body.instrucciones, "instrucciones")
+    contexto = _validate_no_empty(body.contexto, "contexto")
+    modelo_llm = _validate_no_empty(body.modelo_llm, "modelo_llm")
+    historial_max = _validate_historial_max(body.historial_max)
 
     aid = uuid.uuid4().hex
     now = _now()
-    conn = _db_connection()
+    conn = _agentes_connection()
     try:
+        existing = conn.execute("SELECT id FROM agentes WHERE slug=?", (slug,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Ya existe un agente con slug '{slug}'.")
+
         conn.execute(
-            "INSERT INTO agentes (id, nombre, instrucciones, creado_en, actualizado_en) VALUES (?, ?, ?, ?, ?)",
-            (aid, nombre, instrucciones, now, now),
+            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, now, now),
         )
         conn.commit()
         row = conn.execute(
-            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
             (aid,),
         ).fetchone()
         return dict(row)
@@ -446,10 +588,10 @@ def crear_agente(body: AgenteCreate):
          description="Obtiene un agente por su ID.",
          summary="Obtener Agente")
 def obtener_agente(aid: str):
-    conn = _db_connection()
+    conn = _agentes_connection()
     try:
         row = conn.execute(
-            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
             (aid,),
         ).fetchone()
         if not row:
@@ -460,38 +602,49 @@ def obtener_agente(aid: str):
 
 @app.put("/agentes/{aid}",
          tags=["Agentes"],
-         description="Actualiza nombre y/o instrucciones de un agente. Campos no enviados se mantienen.",
+         description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen.",
          summary="Actualizar Agente")
 def actualizar_agente(aid: str, body: AgenteUpdate):
-    conn = _db_connection()
+    if body.id is not None:
+        raise HTTPException(status_code=400, detail="id no es modificable.")
+    if body.slug is not None:
+        raise HTTPException(status_code=400, detail="slug no es modificable.")
+
+    conn = _agentes_connection()
     try:
         row = conn.execute(
-            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
             (aid,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
         actual = dict(row)
 
-        nombre = actual["nombre"] if body.nombre is None else body.nombre.strip()
+        nombre = actual["nombre"] if body.nombre is None else _validate_nombre(body.nombre)
         instrucciones = (
-            actual["instrucciones"] if body.instrucciones is None else body.instrucciones.strip()
+            actual["instrucciones"] if body.instrucciones is None
+            else _validate_no_empty(body.instrucciones, "instrucciones")
+        )
+        contexto = (
+            actual["contexto"] if body.contexto is None
+            else _validate_no_empty(body.contexto, "contexto")
+        )
+        modelo_llm = (
+            actual["modelo_llm"] if body.modelo_llm is None
+            else _validate_no_empty(body.modelo_llm, "modelo_llm")
+        )
+        historial_max = (
+            actual["historial_max"] if body.historial_max is None
+            else _validate_historial_max(body.historial_max)
         )
 
-        if not nombre:
-            raise HTTPException(status_code=400, detail="nombre no puede estar vacío.")
-        if len(nombre) > 80:
-            raise HTTPException(status_code=400, detail="nombre excede 80 caracteres.")
-        if not instrucciones:
-            raise HTTPException(status_code=400, detail="instrucciones no puede estar vacío.")
-
         conn.execute(
-            "UPDATE agentes SET nombre=?, instrucciones=?, actualizado_en=? WHERE id=?",
-            (nombre, instrucciones, _now(), aid),
+            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, actualizado_en=? WHERE id=?",
+            (nombre, instrucciones, contexto, modelo_llm, historial_max, _now(), aid),
         )
         conn.commit()
         row = conn.execute(
-            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
             (aid,),
         ).fetchone()
         return dict(row)
@@ -504,7 +657,7 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             description="Elimina un agente por su ID.",
             summary="Borrar Agente")
 def borrar_agente(aid: str):
-    conn = _db_connection()
+    conn = _agentes_connection()
     try:
         cur = conn.execute("DELETE FROM agentes WHERE id=?", (aid,))
         conn.commit()
@@ -605,4 +758,4 @@ def health():
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8077)

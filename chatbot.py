@@ -1,12 +1,12 @@
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
+from typing import Optional
 from herramientas import obtenContexto
 import funciones
 import herramientas
 
-# Definir el prompt con un espacio para el historial
-# El historial se concatena en un solo string
-prompt = PromptTemplate(
+# Prompt hardcoded del MIDE — fallback legacy cuando no se proveen instrucciones explícitas.
+_DEFAULT_MIDE_PROMPT = PromptTemplate(
     template="""Eres un chatbot asistente del museo. Responde a la pregunta basándote en el siguiente historial y contexto. Si te preguntaran algo no relacionado al museo, solo contesta que tu eres un asistente especializado en el museo.
 
     *** INSTRUCCIÓN CLAVE: La respuesta debe ser concisa, directa y no debe exceder las dos (2) oraciones. ***
@@ -23,11 +23,28 @@ prompt = PromptTemplate(
     {user_question}
 
     Respuesta:""",
-    
     input_variables=["history", "faq_text", "user_question"],
 )
 
-def chat(user_question: str, history: list = [], contexto: str = 'local-rag', modelo_llm: str = 'phi3'):
+def _build_prompt(instrucciones: Optional[str]) -> PromptTemplate:
+    if instrucciones is None:
+        return _DEFAULT_MIDE_PROMPT
+    template = (
+        f"{instrucciones}\n\n"
+        "Historial de la conversación:\n"
+        "{history}\n\n"
+        "Contexto de la FAQ:\n"
+        "{faq_text}\n\n"
+        "Pregunta del usuario:\n"
+        "{user_question}\n\n"
+        "Respuesta:"
+    )
+    return PromptTemplate(
+        template=template,
+        input_variables=["history", "faq_text", "user_question"],
+    )
+
+def chat(user_question: str, history: list = [], contexto: str = 'local-rag', modelo_llm: str = 'phi3', instrucciones: Optional[str] = None):
 
     #Traducir el texto a inglés?
 
@@ -56,7 +73,8 @@ def chat(user_question: str, history: list = [], contexto: str = 'local-rag', mo
         # Formatea el historial para pasárselo al prompt
         formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history])
 
-        # El prompt ahora recibe el historial
+        # Construir prompt dinámico: si llegaron instrucciones, se envuelven; si no, fallback MIDE.
+        prompt = _build_prompt(instrucciones)
         full_prompt = prompt.invoke({
             "history": formatted_history,
             "faq_text": faq_text,
