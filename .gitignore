@@ -3,6 +3,7 @@
 /__pycache__/
 /_temp/
 /vector_db/
+.claude/
 hooks.json
 debug_mide.log*
 logs.db*
