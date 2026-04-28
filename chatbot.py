@@ -1,6 +1,6 @@
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
-from generacion_aumentada import obtenContexto
+from herramientas import obtenContexto
 import funciones
 import herramientas
 

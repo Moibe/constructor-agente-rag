@@ -5,7 +5,6 @@ from pathlib import Path
 import operaciones_chroma
 from typing import Dict, List
 import globales
-import generacion_aumentada
 import herramientas
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
@@ -110,7 +109,7 @@ def listar_documentos(contexto: str) -> list[str]:
 
         if existe_contexto(contexto): 
             #print("La base si existe, continuar...")
-            db = generacion_aumentada.obtenContexto(contexto) #Indicar si no hubo contexto porque no existe.
+            db = herramientas.obtenContexto(contexto) #Indicar si no hubo contexto porque no existe.
             #print("Se obtuvo el contexto: ", db)
             collection = db._collection
             print("Se obtuvo el contexto: ", collection)
@@ -177,7 +176,7 @@ def borrar_documento(contexto: str, filename: str) -> int:
     TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 
     try:
-        db = generacion_aumentada.obtenContexto(contexto)
+        db = herramientas.obtenContexto(contexto)
         collection = db._collection
 
         # 1. Reconstruir la RUTA EXACTA que LangChain guardó en el metadato 'source'.

@@ -3,7 +3,9 @@ import shutil
 import sqlite3
 import json
 import asyncio
+import uuid
 import httpx
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -21,6 +23,7 @@ load_dotenv()
 
 print("="*60, flush=True)
 print("[INICIO] APP.PY CARGADO - Si ves esto, el codigo esta actualizado", flush=True)
+print("[TEST] Cambio de prueba realizado por Claude - verificar sync con VS Code", flush=True)
 print("="*60, flush=True)
 
 # Crear archivo de log para debugging
@@ -46,6 +49,14 @@ logger.info("[OK] Logger inicializado correctamente")
 # Inicializar base de datos SQLite para logs
 LOG_DB_PATH = os.getenv('LOG_DB_PATH', 'logs.db')
 
+def _db_connection():
+    conn = sqlite3.connect(LOG_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 def init_log_db():
     conn = sqlite3.connect(LOG_DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS chat_logs (
@@ -64,10 +75,23 @@ def init_log_db():
     conn.commit()
     conn.close()
 
+def init_agentes_db():
+    conn = sqlite3.connect(LOG_DB_PATH)
+    conn.execute('''CREATE TABLE IF NOT EXISTS agentes (
+        id            TEXT PRIMARY KEY,
+        nombre        TEXT NOT NULL,
+        instrucciones TEXT NOT NULL,
+        creado_en     TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
+    )''')
+    conn.commit()
+    conn.close()
+
 init_log_db()
+init_agentes_db()
 
 app = FastAPI(
-    title="Chatbot - Mide",
+    title="Constructor RAG",
     description="Operaciones generales de chatbot incluídas la creación de contextos, carga de documentos e interacción con chatbot.",
     version="0.0.0"
 )
@@ -117,6 +141,21 @@ class LogRequest(BaseModel):
     respuesta: str
     ms: int
     error: Optional[str] = None
+
+class AgenteCreate(BaseModel):
+    nombre: str
+    instrucciones: str
+
+class AgenteUpdate(BaseModel):
+    nombre: Optional[str] = None
+    instrucciones: Optional[str] = None
+
+class Agente(BaseModel):
+    id: str
+    nombre: str
+    instrucciones: str
+    creado_en: str
+    actualizado_en: str
 
 @app.get("/listarContextos",
          tags=["Contextos"])
@@ -355,6 +394,124 @@ def chatbot(data: ChatRequest):
         return {"Mensaje": response}
     else:
         raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
+
+@app.get("/agentes",
+         tags=["Agentes"],
+         description="Lista todos los agentes configurados, ordenados por fecha de creación descendente.",
+         summary="Listar Agentes")
+def listar_agentes():
+    conn = _db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes ORDER BY creado_en DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+@app.post("/agentes",
+          tags=["Agentes"],
+          status_code=201,
+          description="Crea un nuevo agente con nombre e instrucciones (system prompt).",
+          summary="Crear Agente")
+def crear_agente(body: AgenteCreate):
+    nombre = body.nombre.strip()
+    instrucciones = body.instrucciones.strip()
+    if not instrucciones:
+        raise HTTPException(status_code=400, detail="instrucciones no puede estar vacío.")
+    if not nombre:
+        raise HTTPException(status_code=400, detail="nombre no puede estar vacío.")
+    if len(nombre) > 80:
+        raise HTTPException(status_code=400, detail="nombre excede 80 caracteres.")
+
+    aid = uuid.uuid4().hex
+    now = _now()
+    conn = _db_connection()
+    try:
+        conn.execute(
+            "INSERT INTO agentes (id, nombre, instrucciones, creado_en, actualizado_en) VALUES (?, ?, ?, ?, ?)",
+            (aid, nombre, instrucciones, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            (aid,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+@app.get("/agentes/{aid}",
+         tags=["Agentes"],
+         description="Obtiene un agente por su ID.",
+         summary="Obtener Agente")
+def obtener_agente(aid: str):
+    conn = _db_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            (aid,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
+        return dict(row)
+    finally:
+        conn.close()
+
+@app.put("/agentes/{aid}",
+         tags=["Agentes"],
+         description="Actualiza nombre y/o instrucciones de un agente. Campos no enviados se mantienen.",
+         summary="Actualizar Agente")
+def actualizar_agente(aid: str, body: AgenteUpdate):
+    conn = _db_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            (aid,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
+        actual = dict(row)
+
+        nombre = actual["nombre"] if body.nombre is None else body.nombre.strip()
+        instrucciones = (
+            actual["instrucciones"] if body.instrucciones is None else body.instrucciones.strip()
+        )
+
+        if not nombre:
+            raise HTTPException(status_code=400, detail="nombre no puede estar vacío.")
+        if len(nombre) > 80:
+            raise HTTPException(status_code=400, detail="nombre excede 80 caracteres.")
+        if not instrucciones:
+            raise HTTPException(status_code=400, detail="instrucciones no puede estar vacío.")
+
+        conn.execute(
+            "UPDATE agentes SET nombre=?, instrucciones=?, actualizado_en=? WHERE id=?",
+            (nombre, instrucciones, _now(), aid),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, nombre, instrucciones, creado_en, actualizado_en FROM agentes WHERE id=?",
+            (aid,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+@app.delete("/agentes/{aid}",
+            tags=["Agentes"],
+            status_code=204,
+            description="Elimina un agente por su ID.",
+            summary="Borrar Agente")
+def borrar_agente(aid: str):
+    conn = _db_connection()
+    try:
+        cur = conn.execute("DELETE FROM agentes WHERE id=?", (aid,))
+        conn.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
+    finally:
+        conn.close()
 
 @app.post("/registrarLog",
           tags=["Logs"],

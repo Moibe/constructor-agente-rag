@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import app\")",
+      "WebSearch",
+      "WebFetch(domain:www.mindstudio.ai)",
+      "WebFetch(domain:llm-stats.com)"
+    ]
+  }
+}

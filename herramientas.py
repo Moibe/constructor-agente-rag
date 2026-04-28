@@ -1,10 +1,10 @@
 import hashlib
-import generacion_aumentada
 import chromadb
 import os
 import time
 import logging
 from typing import Optional
+from langchain_chroma import Chroma
 
 # Modelos de OpenAI para embeddings
 OPENAI_EMBEDDING_MODELS = [
@@ -25,6 +25,7 @@ def es_modelo_openai_llm(nombre_modelo: str) -> bool:
     return nombre_modelo in OPENAI_LLM_MODELS
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
+TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL')
 
 
 def es_modelo_openai(nombre_modelo: str) -> bool:
@@ -100,7 +101,7 @@ def is_content_duplicate(nombre_contexto: str, file_hash: str) -> bool:
     print("="*50, flush=True)
     
     print("[...] Llamando a obtenContexto()...", flush=True)
-    db = generacion_aumentada.obtenContexto(nombre_contexto)
+    db = obtenContexto(nombre_contexto)
     print(f"[OK] obtenContexto() retorno: {db}", flush=True)
     
     collection = db._collection
@@ -122,7 +123,7 @@ def debug_check_file_hash_storage(nombre_base: str):
     Función de DEPURACIÓN: Imprime los metadatos del primer documento 
     para verificar si la clave 'file_hash' se guardó correctamente.
     """
-    db = generacion_aumentada.obtenContexto(nombre_base)
+    db = obtenContexto(nombre_base)
     collection = db._collection
     
     # Obtener el primer documento de la colección (limit=1)
@@ -173,3 +174,43 @@ def obtener_modelo_de_embedding_de_coleccion(nombre_contexto: str, client: chrom
 
     logging.warning("No se pudo obtener el modelo de embedding para la colección '%s'", nombre_contexto)
     return None
+
+
+def obtenContexto(nombre_contexto):
+    print("="*50, flush=True)
+    print(f"[INICIO] obtenContexto('{nombre_contexto}')", flush=True)
+    print("="*50, flush=True)
+
+    client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+    print(f"[OK] Cliente ChromaDB creado", flush=True)
+
+    modelo_embedding_nombre = obtener_modelo_de_embedding_de_coleccion(nombre_contexto, client)
+    print(f"[*] Modelo de embedding recuperado: {modelo_embedding_nombre}", flush=True)
+
+    # Si no se encuentra el modelo, usar el modelo por defecto (TEXT_EMBEDDING_MODEL de env vars)
+    if not modelo_embedding_nombre:
+        modelo_embedding_nombre = TEXT_EMBEDDING_MODEL
+        if not modelo_embedding_nombre:
+            print(f"[ERROR] No se pudo obtener el nombre del modelo de embedding para '{nombre_contexto}' y tampoco existe TEXT_EMBEDDING_MODEL en env vars.", flush=True)
+            return None
+        print(f"[AVISO] Usando modelo por defecto: {modelo_embedding_nombre}", flush=True)
+
+    print(f"[...] Creando embedding con modelo: {modelo_embedding_nombre}...", flush=True)
+    embedding = obtener_embedding_function(modelo_embedding_nombre)
+    print(f"[OK] Embedding creado", flush=True)
+
+    print(f"[...] Creando objeto Chroma para coleccion '{nombre_contexto}'...", flush=True)
+    db = Chroma(
+        client=client,
+        collection_name=nombre_contexto,
+        embedding_function=embedding
+    )
+    print(f"[OK] Objeto Chroma creado", flush=True)
+
+    if db._collection.count() > 0:
+        print(f"La colección '{nombre_contexto}' existe y tiene {db._collection.count()} documentos.")
+    else:
+        print(f"La colección '{nombre_contexto}' está vacía.")
+
+    return db

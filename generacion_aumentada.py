@@ -5,11 +5,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import UnstructuredPDFLoader
 import herramientas
 import chromadb
-from langchain_chroma import Chroma
 
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
-TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL')
 
 # Function to check if the uploaded file is allowed (only PDF files)
 def allowed_file(filename):
@@ -96,7 +94,7 @@ def embed(file_path, nombre_contexto, current_hash):
             chunk.metadata['embedding_model_name'] = modelo_embedding
 
         print("[...] Obteniendo contexto de ChromaDB...", flush=True)
-        db = obtenContexto(nombre_contexto)
+        db = herramientas.obtenContexto(nombre_contexto)
         if not db:
             return {'success': False, 'message': 'No se pudo obtener la base de datos del contexto', 'error_details': f'Contexto: {nombre_contexto}'}
         
@@ -149,42 +147,3 @@ def obtener_modelo_embedding_de_contexto(nombre_contexto: str) -> str | None:
     except Exception as e:
         print(f"[ERROR] Error en obtener_modelo_embedding_de_contexto: {e}")
         return None
-    
-def obtenContexto(nombre_contexto): 
-    print("="*50, flush=True)
-    print(f"[INICIO] obtenContexto('{nombre_contexto}')", flush=True)
-    print("="*50, flush=True)
-
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
-
-    print(f"[OK] Cliente ChromaDB creado", flush=True)
-    
-    modelo_embedding_nombre = herramientas.obtener_modelo_de_embedding_de_coleccion(nombre_contexto, client)
-    print(f"[*] Modelo de embedding recuperado: {modelo_embedding_nombre}", flush=True)
-    
-    # Si no se encuentra el modelo, usar el modelo por defecto (TEXT_EMBEDDING_MODEL de env vars)
-    if not modelo_embedding_nombre:
-        modelo_embedding_nombre = TEXT_EMBEDDING_MODEL
-        if not modelo_embedding_nombre:
-            print(f"[ERROR] No se pudo obtener el nombre del modelo de embedding para '{nombre_contexto}' y tampoco existe TEXT_EMBEDDING_MODEL en env vars.", flush=True)
-            return None
-        print(f"[AVISO] Usando modelo por defecto: {modelo_embedding_nombre}", flush=True)
-
-    print(f"[...] Creando embedding con modelo: {modelo_embedding_nombre}...", flush=True)
-    embedding = herramientas.obtener_embedding_function(modelo_embedding_nombre)
-    print(f"[OK] Embedding creado", flush=True)
-    
-    print(f"[...] Creando objeto Chroma para coleccion '{nombre_contexto}'...", flush=True)
-    db = Chroma(
-        client=client,
-        collection_name=nombre_contexto,
-        embedding_function=embedding
-    )
-    print(f"[OK] Objeto Chroma creado", flush=True)
-
-    if db._collection.count() > 0:
-        print(f"La colección '{nombre_contexto}' existe y tiene {db._collection.count()} documentos.")
-    else:
-        print(f"La colección '{nombre_contexto}' está vacía.")
-
-    return db
