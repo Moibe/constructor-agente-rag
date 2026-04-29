@@ -14,9 +14,13 @@ OPENAI_EMBEDDING_MODELS = [
 ]
 
 OPENAI_LLM_MODELS = [
-    "gpt-4o-mini",
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
     "gpt-4o",
-    "gpt-3.5-turbo"
+    "gpt-4o-mini"
 ]
 
 
