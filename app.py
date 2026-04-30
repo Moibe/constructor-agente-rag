@@ -89,6 +89,51 @@ def _validate_historial_max(value: int) -> int:
         raise HTTPException(status_code=400, detail="historial_max debe ser entero en rango 0-50.")
     return value
 
+def _validate_descripcion(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    s = value.strip()
+    if len(s) > 500:
+        raise HTTPException(status_code=400, detail="descripcion excede 500 caracteres.")
+    return s if s else None
+
+def _validate_proyecto_existe(proyecto_id: str) -> dict:
+    """Devuelve el row del proyecto si existe; lanza 400 si no."""
+    if not proyecto_id or not proyecto_id.strip():
+        raise HTTPException(status_code=400, detail="proyecto_id no puede estar vacío.")
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, slug, nombre, descripcion, creado_en, actualizado_en FROM proyectos WHERE id=?",
+            (proyecto_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail=f"proyecto_id '{proyecto_id}' no existe.")
+        return dict(row)
+    finally:
+        conn.close()
+
+def _validate_bc_pertenece_a_proyecto(nombre_chroma: str, proyecto_id: str):
+    """Lanza 400 si la BC no existe o pertenece a otro proyecto."""
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(
+            "SELECT proyecto_id FROM bases_conocimiento WHERE nombre_chroma=?",
+            (nombre_chroma,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La base de conocimiento '{nombre_chroma}' no está registrada (no existe o no fue creada con un proyecto asociado).",
+            )
+        if row["proyecto_id"] != proyecto_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"La base de conocimiento '{nombre_chroma}' no pertenece al proyecto '{proyecto_id}'.",
+            )
+    finally:
+        conn.close()
+
 def init_log_db():
     conn = sqlite3.connect(LOG_DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS chat_logs (
@@ -107,6 +152,53 @@ def init_log_db():
     conn.commit()
     conn.close()
 
+def _init_agentes_meta():
+    """Tabla _meta en agentes.db para flags de migración one-shot."""
+    conn = sqlite3.connect(AGENTES_DB_PATH)
+    conn.execute('CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)')
+    conn.commit()
+    conn.close()
+
+def migrate_agentes_v2():
+    """One-shot: dropear la tabla agentes vieja (sin proyecto_id) y dejar que
+    init_agentes_db la recree con el nuevo schema. Tracked vía _meta para que
+    no corra en cada arranque y no se evapore data nueva en restores.
+
+    El usuario decidió explícitamente no migrar datos viejos al introducir el
+    concepto de Proyectos — cualquier fila previa se borra acá."""
+    conn = sqlite3.connect(AGENTES_DB_PATH)
+    try:
+        flag = conn.execute(
+            "SELECT value FROM _meta WHERE key='agentes_v2_proyectos_migration_done'"
+        ).fetchone()
+        if flag and flag[0] == 'true':
+            return
+
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agentes'"
+        ).fetchone()
+
+        if existing is not None:
+            count = conn.execute("SELECT COUNT(*) FROM agentes").fetchone()[0]
+            if count > 0:
+                logger.warning(
+                    f"[MIGRATION agentes_v2] La tabla agentes tiene {count} fila(s) "
+                    "que se van a eliminar. El usuario decidió no migrar al "
+                    "introducir Proyectos. Si esto es inesperado (restore de backup), "
+                    "detén el servidor y respalda agentes.db antes de reiniciar."
+                )
+            else:
+                logger.info("[MIGRATION agentes_v2] Dropeando tabla agentes vacía para recrear con nuevo schema.")
+            conn.execute('DROP TABLE IF EXISTS agentes')
+
+        conn.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+            ('agentes_v2_proyectos_migration_done', 'true'),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 def init_agentes_db():
     conn = sqlite3.connect(AGENTES_DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS agentes (
@@ -117,10 +209,39 @@ def init_agentes_db():
         contexto       TEXT NOT NULL,
         modelo_llm     TEXT NOT NULL,
         historial_max  INTEGER NOT NULL DEFAULT 5,
+        proyecto_id    TEXT NOT NULL,
         creado_en      TEXT NOT NULL,
         actualizado_en TEXT NOT NULL
     )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_slug ON agentes(slug)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_proyecto ON agentes(proyecto_id)')
+    conn.commit()
+    conn.close()
+
+def init_proyectos_db():
+    conn = sqlite3.connect(AGENTES_DB_PATH)
+    conn.execute('''CREATE TABLE IF NOT EXISTS proyectos (
+        id             TEXT PRIMARY KEY,
+        slug           TEXT NOT NULL UNIQUE,
+        nombre         TEXT NOT NULL,
+        descripcion    TEXT,
+        creado_en      TEXT NOT NULL,
+        actualizado_en TEXT NOT NULL
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_proyectos_slug ON proyectos(slug)')
+    conn.commit()
+    conn.close()
+
+def init_bases_conocimiento_db():
+    conn = sqlite3.connect(AGENTES_DB_PATH)
+    conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute('''CREATE TABLE IF NOT EXISTS bases_conocimiento (
+        nombre_chroma  TEXT PRIMARY KEY,
+        proyecto_id    TEXT NOT NULL,
+        creado_en      TEXT NOT NULL,
+        FOREIGN KEY (proyecto_id) REFERENCES proyectos(id) ON DELETE RESTRICT
+    )''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_bc_proyecto ON bases_conocimiento(proyecto_id)')
     conn.commit()
     conn.close()
 
@@ -170,6 +291,10 @@ def cleanup_legacy_agentes_in_logs_db():
         conn.close()
 
 init_log_db()
+_init_agentes_meta()
+migrate_agentes_v2()
+init_proyectos_db()
+init_bases_conocimiento_db()
 init_agentes_db()
 cleanup_legacy_agentes_in_logs_db()
 
@@ -193,11 +318,9 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Definir la carpeta temporal para los archivos y la carpeta de la base de datos vectorial
+# Carpeta temporal para uploads de documentos antes de embeber.
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
-DB_FOLDER = os.getenv('VECTOR_DB_FOLDER', './vector_db')
 Path(TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
-Path(DB_FOLDER).mkdir(parents=True, exist_ok=True)
 
 class ChatRequest(BaseModel):
     pregunta: str
@@ -235,6 +358,7 @@ class AgenteCreate(BaseModel):
     contexto: str
     modelo_llm: str
     historial_max: int = 5
+    proyecto_id: str
 
 class AgenteUpdate(BaseModel):
     nombre: Optional[str] = None
@@ -242,6 +366,7 @@ class AgenteUpdate(BaseModel):
     contexto: Optional[str] = None
     modelo_llm: Optional[str] = None
     historial_max: Optional[int] = None
+    proyecto_id: Optional[str] = None
     # Sentinels para detectar intentos de modificar campos inmutables
     id: Optional[str] = None
     slug: Optional[str] = None
@@ -254,30 +379,73 @@ class Agente(BaseModel):
     contexto: str
     modelo_llm: str
     historial_max: int
+    proyecto_id: str
+    creado_en: str
+    actualizado_en: str
+
+class ProyectoCreate(BaseModel):
+    slug: str
+    nombre: str
+    descripcion: Optional[str] = None
+
+class ProyectoUpdate(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    # Sentinels para detectar intentos de modificar campos inmutables
+    id: Optional[str] = None
+    slug: Optional[str] = None
+
+class Proyecto(BaseModel):
+    id: str
+    slug: str
+    nombre: str
+    descripcion: Optional[str]
     creado_en: str
     actualizado_en: str
 
 @app.get("/listarContextos",
          tags=["Contextos"])
-def listar_contextos():
+def listar_contextos(proyecto_id: Optional[str] = None):
     """
-    Endpoint para listar todos los contextos del Chatbot.
+    Lista todos los contextos del chatbot. Cada entrada incluye `proyecto_id`
+    si la BC está registrada en `bases_conocimiento`. Si se pasa
+    `?proyecto_id=...`, filtra a las BCs de ese proyecto (excluye huérfanas).
     """
     try:
         resultado = funciones.listar_contextos_con_conteo()
-        return {"Contextos existentes para este chatbot": resultado} 
+
+        # Enriquecer con proyecto_id desde bases_conocimiento
+        conn = _agentes_connection()
+        try:
+            bc_rows = conn.execute(
+                "SELECT nombre_chroma, proyecto_id FROM bases_conocimiento"
+            ).fetchall()
+            mapping = {r["nombre_chroma"]: r["proyecto_id"] for r in bc_rows}
+        finally:
+            conn.close()
+
+        for nombre, datos in resultado.items():
+            datos["proyecto_id"] = mapping.get(nombre)
+
+        if proyecto_id:
+            resultado = {n: d for n, d in resultado.items() if d.get("proyecto_id") == proyecto_id}
+
+        return {"Contextos existentes para este chatbot": resultado}
     except Exception as e:
         return {"error": f"Error al listar las colecciones: {e}"}
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size: Optional[int] = None):
+async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id: str, chunk_size: Optional[int] = None):
     """
-    Endpoint para crear un nueva contexto vacío para el Chatbot.
-    Si no se especifica chunk_size, se calcula automáticamente como el 80% del máximo
-    permitido por el modelo (context_window_tokens × 3 × 0.8).
+    Crea una BC vacía y la registra en `bases_conocimiento` asociada al
+    `proyecto_id` indicado. Si `proyecto_id` no existe → 400.
+    Si no se especifica chunk_size, se calcula automáticamente como el 80% del
+    máximo permitido por el modelo (context_window_tokens × 3 × 0.8).
     """
     try:
+        # Validar que el proyecto exista antes de crear nada en Chroma
+        _validate_proyecto_existe(proyecto_id)
         # 1. Obtener información del modelo desde Ollama (o definir defaults para OpenAI)
         context_window = 4096  # Default conservador
         
@@ -339,7 +507,31 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size:
                 )
             )
 
-        return funciones.crear_contexto(nombre_contexto, embedding_model, chunk_size)
+        resultado = funciones.crear_contexto(nombre_contexto, embedding_model, chunk_size)
+
+        # Registrar la BC en bases_conocimiento (idempotente: si ya existe, actualizar proyecto_id no — solo insertar nuevas).
+        conn = _agentes_connection()
+        try:
+            existing = conn.execute(
+                "SELECT proyecto_id FROM bases_conocimiento WHERE nombre_chroma=?",
+                (nombre_contexto,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO bases_conocimiento (nombre_chroma, proyecto_id, creado_en) VALUES (?, ?, ?)",
+                    (nombre_contexto, proyecto_id, _now()),
+                )
+                conn.commit()
+            elif existing["proyecto_id"] != proyecto_id:
+                logger.warning(
+                    f"[BC REGISTER] '{nombre_contexto}' ya estaba registrada con proyecto_id="
+                    f"'{existing['proyecto_id']}'. Se ignora el nuevo proyecto_id='{proyecto_id}'. "
+                    "Las BCs no cambian de proyecto post-creación."
+                )
+        finally:
+            conn.close()
+
+        return resultado
     except HTTPException:
         raise
     except Exception as e:
@@ -350,14 +542,39 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, chunk_size:
             tags=["Contextos"])
 def borrar_contexto(contexto: str):
     """
-    Endpoint para borrar una colección de ChromaDB por su nombre.
+    Borra una colección de ChromaDB por su nombre. Bloquea con 409 si algún
+    agente la referencia. También limpia el registro en `bases_conocimiento`.
     """
     try:
+        # Bloquear si algún agente referencia este contexto
+        conn = _agentes_connection()
+        try:
+            n_agentes = conn.execute(
+                "SELECT COUNT(*) FROM agentes WHERE contexto=?", (contexto,)
+            ).fetchone()[0]
+            if n_agentes > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"No se puede borrar la BC '{contexto}': la usan {n_agentes} agente(s). Bórralos primero o muévelos a otra BC.",
+                )
+        finally:
+            conn.close()
+
         funciones.delete_contexto(contexto)
-            
+
+        # Limpiar el registro en bases_conocimiento
+        conn = _agentes_connection()
+        try:
+            conn.execute("DELETE FROM bases_conocimiento WHERE nombre_chroma=?", (contexto,))
+            conn.commit()
+        finally:
+            conn.close()
+
         return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"error": f"Error al borrar contexto: {e}"}    
+        return {"error": f"Error al borrar contexto: {e}"}
 
 @app.get("/listarDocumentos",
          tags=["Documentos"],
@@ -479,7 +696,142 @@ def borrar_documento(data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, creado_en, actualizado_en"
+_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en"
+_PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en"
+
+@app.get("/proyectos",
+         tags=["Proyectos"],
+         description="Lista todos los proyectos, ordenados por fecha de creación descendente.",
+         summary="Listar Proyectos")
+def listar_proyectos():
+    conn = _agentes_connection()
+    try:
+        rows = conn.execute(
+            f"SELECT {_PROYECTO_COLS} FROM proyectos ORDER BY creado_en DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+@app.post("/proyectos",
+          tags=["Proyectos"],
+          status_code=201,
+          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes.",
+          summary="Crear Proyecto")
+def crear_proyecto(body: ProyectoCreate):
+    slug = _validate_slug(body.slug)
+    nombre = _validate_nombre(body.nombre)
+    descripcion = _validate_descripcion(body.descripcion)
+
+    pid = uuid.uuid4().hex
+    now = _now()
+    conn = _agentes_connection()
+    try:
+        existing = conn.execute("SELECT id FROM proyectos WHERE slug=?", (slug,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Ya existe un proyecto con slug '{slug}'.")
+
+        conn.execute(
+            f"INSERT INTO proyectos ({_PROYECTO_COLS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (pid, slug, nombre, descripcion, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
+            (pid,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+@app.get("/proyectos/{pid}",
+         tags=["Proyectos"],
+         description="Obtiene un proyecto por su ID.",
+         summary="Obtener Proyecto")
+def obtener_proyecto(pid: str):
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(
+            f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
+            (pid,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
+        return dict(row)
+    finally:
+        conn.close()
+
+@app.put("/proyectos/{pid}",
+         tags=["Proyectos"],
+         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables.",
+         summary="Actualizar Proyecto")
+def actualizar_proyecto(pid: str, body: ProyectoUpdate):
+    if body.id is not None:
+        raise HTTPException(status_code=400, detail="id no es modificable.")
+    if body.slug is not None:
+        raise HTTPException(status_code=400, detail="slug no es modificable.")
+
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(
+            f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
+            (pid,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
+        actual = dict(row)
+
+        nombre = actual["nombre"] if body.nombre is None else _validate_nombre(body.nombre)
+        descripcion = (
+            actual["descripcion"] if body.descripcion is None
+            else _validate_descripcion(body.descripcion)
+        )
+
+        conn.execute(
+            "UPDATE proyectos SET nombre=?, descripcion=?, actualizado_en=? WHERE id=?",
+            (nombre, descripcion, _now(), pid),
+        )
+        conn.commit()
+        row = conn.execute(
+            f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
+            (pid,),
+        ).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+@app.delete("/proyectos/{pid}",
+            tags=["Proyectos"],
+            status_code=204,
+            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados.",
+            summary="Borrar Proyecto")
+def borrar_proyecto(pid: str):
+    conn = _agentes_connection()
+    try:
+        row = conn.execute("SELECT id FROM proyectos WHERE id=?", (pid,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
+
+        n_agentes = conn.execute(
+            "SELECT COUNT(*) FROM agentes WHERE proyecto_id=?", (pid,)
+        ).fetchone()[0]
+        n_bcs = conn.execute(
+            "SELECT COUNT(*) FROM bases_conocimiento WHERE proyecto_id=?", (pid,)
+        ).fetchone()[0]
+
+        if n_agentes > 0 or n_bcs > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Proyecto tiene {n_agentes} agente(s) y {n_bcs} base(s) de conocimiento, "
+                    "bórralos primero o muévelos a otro proyecto."
+                ),
+            )
+
+        conn.execute("DELETE FROM proyectos WHERE id=?", (pid,))
+        conn.commit()
+    finally:
+        conn.close()
 
 @app.post("/chatbot",
           tags=["Chatbot"])
@@ -537,14 +889,20 @@ def chatbot(data: ChatRequest):
 
 @app.get("/agentes",
          tags=["Agentes"],
-         description="Lista todos los agentes configurados, ordenados por fecha de creación descendente.",
+         description="Lista todos los agentes. Acepta ?proyecto_id=... para filtrar.",
          summary="Listar Agentes")
-def listar_agentes():
+def listar_agentes(proyecto_id: Optional[str] = None):
     conn = _agentes_connection()
     try:
-        rows = conn.execute(
-            f"SELECT {_AGENTE_COLS} FROM agentes ORDER BY creado_en DESC"
-        ).fetchall()
+        if proyecto_id:
+            rows = conn.execute(
+                f"SELECT {_AGENTE_COLS} FROM agentes WHERE proyecto_id=? ORDER BY creado_en DESC",
+                (proyecto_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {_AGENTE_COLS} FROM agentes ORDER BY creado_en DESC"
+            ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -552,7 +910,7 @@ def listar_agentes():
 @app.post("/agentes",
           tags=["Agentes"],
           status_code=201,
-          description="Crea un agente con bundle completo (slug, nombre, instrucciones, contexto, modelo_llm, historial_max).",
+          description="Crea un agente. Requiere proyecto_id; el contexto referenciado debe ser una BC del mismo proyecto.",
           summary="Crear Agente")
 def crear_agente(body: AgenteCreate):
     slug = _validate_slug(body.slug)
@@ -561,6 +919,8 @@ def crear_agente(body: AgenteCreate):
     contexto = _validate_no_empty(body.contexto, "contexto")
     modelo_llm = _validate_no_empty(body.modelo_llm, "modelo_llm")
     historial_max = _validate_historial_max(body.historial_max)
+    _validate_proyecto_existe(body.proyecto_id)
+    _validate_bc_pertenece_a_proyecto(contexto, body.proyecto_id)
 
     aid = uuid.uuid4().hex
     now = _now()
@@ -571,8 +931,8 @@ def crear_agente(body: AgenteCreate):
             raise HTTPException(status_code=409, detail=f"Ya existe un agente con slug '{slug}'.")
 
         conn.execute(
-            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, now, now),
+            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, body.proyecto_id, now, now),
         )
         conn.commit()
         row = conn.execute(
@@ -602,7 +962,7 @@ def obtener_agente(aid: str):
 
 @app.put("/agentes/{aid}",
          tags=["Agentes"],
-         description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen.",
+         description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen. Si cambias proyecto_id o contexto, se valida la consistencia BC↔proyecto.",
          summary="Actualizar Agente")
 def actualizar_agente(aid: str, body: AgenteUpdate):
     if body.id is not None:
@@ -637,10 +997,23 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             actual["historial_max"] if body.historial_max is None
             else _validate_historial_max(body.historial_max)
         )
+        proyecto_id_efectivo = (
+            actual["proyecto_id"] if body.proyecto_id is None else body.proyecto_id
+        )
+
+        # Si proyecto_id cambió, validar que el nuevo exista
+        if body.proyecto_id is not None and body.proyecto_id != actual["proyecto_id"]:
+            _validate_proyecto_existe(proyecto_id_efectivo)
+
+        # Si cambió contexto o proyecto_id, validar la consistencia BC↔proyecto
+        contexto_cambio = body.contexto is not None and contexto != actual["contexto"]
+        proyecto_cambio = body.proyecto_id is not None and proyecto_id_efectivo != actual["proyecto_id"]
+        if contexto_cambio or proyecto_cambio:
+            _validate_bc_pertenece_a_proyecto(contexto, proyecto_id_efectivo)
 
         conn.execute(
-            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, actualizado_en=? WHERE id=?",
-            (nombre, instrucciones, contexto, modelo_llm, historial_max, _now(), aid),
+            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, actualizado_en=? WHERE id=?",
+            (nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id_efectivo, _now(), aid),
         )
         conn.commit()
         row = conn.execute(
