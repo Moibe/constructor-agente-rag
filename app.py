@@ -304,11 +304,14 @@ app = FastAPI(
     version="0.0.0"
 )
 
-# Configurar CORS en base a variable de entorno (lista separada por comas)
+# Configurar CORS en base a variable de entorno (lista separada por comas).
+# Si llega "*" en la lista, colapsamos a ["*"] (FastAPI/Starlette no acepta "*" mezclado con otros).
 allowed_origins_env = os.getenv('CORS_ALLOWED_ORIGINS', '*')
 allowed_origins = [origin.strip() for origin in allowed_origins_env.split(',') if origin.strip()]
-if not allowed_origins:
+if not allowed_origins or '*' in allowed_origins:
     allowed_origins = ["*"]
+
+logger.info(f"[CORS] allow_origins={allowed_origins} (source: env CORS_ALLOWED_ORIGINS={allowed_origins_env!r})")
 
 app.add_middleware(
     CORSMiddleware,
