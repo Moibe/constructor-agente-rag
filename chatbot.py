@@ -26,6 +26,27 @@ _DEFAULT_MIDE_PROMPT = PromptTemplate(
     input_variables=["history", "faq_text", "user_question"],
 )
 
+def _extraer_texto_de_respuesta(content) -> str:
+    """Aplana la respuesta de LangChain a un string.
+
+    Maneja dos casos:
+    - Chat Completions (gpt-4o, mistral, llama3.1, etc.): content ya es str.
+    - Responses API (gpt-5, gpt-5-mini, gpt-5-nano, gpt-5.5, gpt-5.5-pro): content
+      es una lista de dicts donde cada item tiene un 'type' ('reasoning' | 'text').
+      Solo nos quedamos con los items de tipo 'text' y los concatenamos.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        partes = [
+            item.get('text', '')
+            for item in content
+            if isinstance(item, dict) and item.get('type') == 'text'
+        ]
+        return ' '.join(p for p in partes if p).strip()
+    return str(content)
+
+
 def _build_prompt(instrucciones: Optional[str]) -> PromptTemplate:
     if instrucciones is None:
         return _DEFAULT_MIDE_PROMPT
@@ -84,10 +105,12 @@ def chat(user_question: str, history: list = [], contexto: str = 'local-rag', mo
         # Genera la respuesta
         response = llm.invoke(full_prompt)
 
-        # Uniformar respuesta: ChatOpenAI devuelve AIMessage, OllamaLLM devuelve str
-        if hasattr(response, 'content'):
-            return response.content
-        return response
+        # Uniformar respuesta a string plano:
+        # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
+        # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
+        # - OllamaLLM: response es str directo.
+        raw = response.content if hasattr(response, 'content') else response
+        return _extraer_texto_de_respuesta(raw)
     
     else:
         return {"Mensaje": "No existe ese contexto."}
