@@ -89,6 +89,20 @@ def _validate_historial_max(value: int) -> int:
         raise HTTPException(status_code=400, detail="historial_max debe ser entero en rango 0-50.")
     return value
 
+def _validate_color(value: Optional[str], field_name: str) -> Optional[str]:
+    """Validación mínima: string + longitud <= 9 (acepta #rrggbb y futuro #rrggbbaa).
+    Empty/whitespace → None para que el frontend pueda resetear al default."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{field_name} debe ser string.")
+    s = value.strip()
+    if not s:
+        return None
+    if len(s) > 9:
+        raise HTTPException(status_code=400, detail=f"{field_name} excede 9 caracteres.")
+    return s
+
 def _validate_descripcion(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -202,19 +216,30 @@ def migrate_agentes_v2():
 def init_agentes_db():
     conn = sqlite3.connect(AGENTES_DB_PATH)
     conn.execute('''CREATE TABLE IF NOT EXISTS agentes (
-        id             TEXT PRIMARY KEY,
-        slug           TEXT NOT NULL UNIQUE,
-        nombre         TEXT NOT NULL,
-        instrucciones  TEXT NOT NULL,
-        contexto       TEXT NOT NULL,
-        modelo_llm     TEXT NOT NULL,
-        historial_max  INTEGER NOT NULL DEFAULT 5,
-        proyecto_id    TEXT NOT NULL,
-        creado_en      TEXT NOT NULL,
-        actualizado_en TEXT NOT NULL
+        id                TEXT PRIMARY KEY,
+        slug              TEXT NOT NULL UNIQUE,
+        nombre            TEXT NOT NULL,
+        instrucciones     TEXT NOT NULL,
+        contexto          TEXT NOT NULL,
+        modelo_llm        TEXT NOT NULL,
+        historial_max     INTEGER NOT NULL DEFAULT 5,
+        proyecto_id       TEXT NOT NULL,
+        creado_en         TEXT NOT NULL,
+        actualizado_en    TEXT NOT NULL,
+        color_primario    TEXT,
+        color_burbuja_bot TEXT,
+        color_fondo_chat  TEXT,
+        color_header      TEXT
     )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_slug ON agentes(slug)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_proyecto ON agentes(proyecto_id)')
+
+    # Migración idempotente para deploys existentes: agregar columnas color_* si faltan.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(agentes)").fetchall()}
+    for col in ('color_primario', 'color_burbuja_bot', 'color_fondo_chat', 'color_header'):
+        if col not in existing_cols:
+            conn.execute(f'ALTER TABLE agentes ADD COLUMN {col} TEXT')
+
     conn.commit()
     conn.close()
 
@@ -362,6 +387,10 @@ class AgenteCreate(BaseModel):
     modelo_llm: str
     historial_max: int = 5
     proyecto_id: str
+    color_primario: Optional[str] = None
+    color_burbuja_bot: Optional[str] = None
+    color_fondo_chat: Optional[str] = None
+    color_header: Optional[str] = None
 
 class AgenteUpdate(BaseModel):
     nombre: Optional[str] = None
@@ -370,6 +399,10 @@ class AgenteUpdate(BaseModel):
     modelo_llm: Optional[str] = None
     historial_max: Optional[int] = None
     proyecto_id: Optional[str] = None
+    color_primario: Optional[str] = None
+    color_burbuja_bot: Optional[str] = None
+    color_fondo_chat: Optional[str] = None
+    color_header: Optional[str] = None
     # Sentinels para detectar intentos de modificar campos inmutables
     id: Optional[str] = None
     slug: Optional[str] = None
@@ -385,6 +418,10 @@ class Agente(BaseModel):
     proyecto_id: str
     creado_en: str
     actualizado_en: str
+    color_primario: Optional[str] = None
+    color_burbuja_bot: Optional[str] = None
+    color_fondo_chat: Optional[str] = None
+    color_header: Optional[str] = None
 
 class ProyectoCreate(BaseModel):
     slug: str
@@ -699,7 +736,7 @@ def borrar_documento(data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en"
+_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header"
 _PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en"
 
 @app.get("/proyectos",
@@ -922,6 +959,10 @@ def crear_agente(body: AgenteCreate):
     contexto = _validate_no_empty(body.contexto, "contexto")
     modelo_llm = _validate_no_empty(body.modelo_llm, "modelo_llm")
     historial_max = _validate_historial_max(body.historial_max)
+    color_primario = _validate_color(body.color_primario, "color_primario")
+    color_burbuja_bot = _validate_color(body.color_burbuja_bot, "color_burbuja_bot")
+    color_fondo_chat = _validate_color(body.color_fondo_chat, "color_fondo_chat")
+    color_header = _validate_color(body.color_header, "color_header")
     _validate_proyecto_existe(body.proyecto_id)
     _validate_bc_pertenece_a_proyecto(contexto, body.proyecto_id)
 
@@ -934,8 +975,9 @@ def crear_agente(body: AgenteCreate):
             raise HTTPException(status_code=409, detail=f"Ya existe un agente con slug '{slug}'.")
 
         conn.execute(
-            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, body.proyecto_id, now, now),
+            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, body.proyecto_id, now, now,
+             color_primario, color_burbuja_bot, color_fondo_chat, color_header),
         )
         conn.commit()
         row = conn.execute(
@@ -963,10 +1005,11 @@ def obtener_agente(aid: str):
     finally:
         conn.close()
 
-@app.put("/agentes/{aid}",
-         tags=["Agentes"],
-         description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen. Si cambias proyecto_id o contexto, se valida la consistencia BC↔proyecto.",
-         summary="Actualizar Agente")
+@app.api_route("/agentes/{aid}",
+               methods=["PUT", "PATCH"],
+               tags=["Agentes"],
+               description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen (partial update, semántica PATCH/PUT). Si cambias proyecto_id o contexto, se valida la consistencia BC↔proyecto.",
+               summary="Actualizar Agente")
 def actualizar_agente(aid: str, body: AgenteUpdate):
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
@@ -1003,6 +1046,22 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
         proyecto_id_efectivo = (
             actual["proyecto_id"] if body.proyecto_id is None else body.proyecto_id
         )
+        color_primario = (
+            actual["color_primario"] if body.color_primario is None
+            else _validate_color(body.color_primario, "color_primario")
+        )
+        color_burbuja_bot = (
+            actual["color_burbuja_bot"] if body.color_burbuja_bot is None
+            else _validate_color(body.color_burbuja_bot, "color_burbuja_bot")
+        )
+        color_fondo_chat = (
+            actual["color_fondo_chat"] if body.color_fondo_chat is None
+            else _validate_color(body.color_fondo_chat, "color_fondo_chat")
+        )
+        color_header = (
+            actual["color_header"] if body.color_header is None
+            else _validate_color(body.color_header, "color_header")
+        )
 
         # Si proyecto_id cambió, validar que el nuevo exista
         if body.proyecto_id is not None and body.proyecto_id != actual["proyecto_id"]:
@@ -1015,8 +1074,9 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             _validate_bc_pertenece_a_proyecto(contexto, proyecto_id_efectivo)
 
         conn.execute(
-            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, actualizado_en=? WHERE id=?",
-            (nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id_efectivo, _now(), aid),
+            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, color_primario=?, color_burbuja_bot=?, color_fondo_chat=?, color_header=?, actualizado_en=? WHERE id=?",
+            (nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id_efectivo,
+             color_primario, color_burbuja_bot, color_fondo_chat, color_header, _now(), aid),
         )
         conn.commit()
         row = conn.execute(
