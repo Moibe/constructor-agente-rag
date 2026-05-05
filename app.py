@@ -580,35 +580,54 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id
 
 @app.delete("/borrarContexto",
             tags=["Contextos"])
-def borrar_contexto(contexto: str):
+def borrar_contexto(contexto: str, force: bool = False):
     """
-    Borra una colección de ChromaDB por su nombre. Bloquea con 409 si algún
-    agente la referencia. También limpia el registro en `bases_conocimiento`.
+    Borra una colección de ChromaDB por su nombre.
+
+    - Por default (force=False): bloquea con 409 si la BC está en uso por
+      algún agente.
+    - Con `?force=true`: borra de todas formas, y limpia el campo `contexto`
+      de los agentes afectados a `""` (la columna es NOT NULL en el schema
+      actual; el agente queda válido pero sin RAG hasta que se le asigne otra
+      BC).
+
+    También limpia el registro en `bases_conocimiento`. Atomicidad SQL: el
+    UPDATE de agentes y el DELETE de bases_conocimiento ocurren en la misma
+    transacción (commit único). El delete_collection de Chroma se hace DESPUÉS
+    del commit; si Chroma falla post-commit, los agentes ya quedaron
+    consistentes y un retry del endpoint completa el cleanup.
     """
     try:
-        # Bloquear si algún agente referencia este contexto
         conn = _agentes_connection()
         try:
             n_agentes = conn.execute(
                 "SELECT COUNT(*) FROM agentes WHERE contexto=?", (contexto,)
             ).fetchone()[0]
-            if n_agentes > 0:
+
+            if n_agentes > 0 and not force:
                 raise HTTPException(
                     status_code=409,
                     detail=f"No se puede borrar la BC '{contexto}': la usan {n_agentes} agente(s). Bórralos primero o muévelos a otra BC.",
                 )
-        finally:
-            conn.close()
 
-        funciones.delete_contexto(contexto)
+            if n_agentes > 0 and force:
+                logger.warning(
+                    f"[FORCE DELETE BC] Borrando BC '{contexto}' en uso por {n_agentes} "
+                    "agente(s). Sus contextos quedarán en '' (sin RAG)."
+                )
 
-        # Limpiar el registro en bases_conocimiento
-        conn = _agentes_connection()
-        try:
+            # Misma conexión = misma transacción SQLite. commit() al final, o rollback
+            # automático al cerrar si algo lanza excepción antes.
+            conn.execute(
+                "UPDATE agentes SET contexto='', actualizado_en=? WHERE contexto=?",
+                (_now(), contexto),
+            )
             conn.execute("DELETE FROM bases_conocimiento WHERE nombre_chroma=?", (contexto,))
             conn.commit()
         finally:
             conn.close()
+
+        funciones.delete_contexto(contexto)
 
         return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
     except HTTPException:
