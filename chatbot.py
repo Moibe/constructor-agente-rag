@@ -65,52 +65,54 @@ def _build_prompt(instrucciones: Optional[str]) -> PromptTemplate:
         input_variables=["history", "faq_text", "user_question"],
     )
 
-def chat(user_question: str, history: list = [], contexto: str = 'local-rag', modelo_llm: str = 'phi3', instrucciones: Optional[str] = None):
+def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None):
+    # Si llega contexto string-no-vacío, debe existir en Chroma. Si llega None/empty,
+    # el agente está "sin BC" → modo chat puro (sin RAG).
+    sin_rag = not contexto
+    if not sin_rag and not funciones.existe_contexto(contexto):
+        return {"Mensaje": "No existe ese contexto."}
 
-    #Traducir el texto a inglés?
+    try:
+        print("Inicializando modelo de lenguaje: ", modelo_llm)
+        if funciones.existe_modelo(modelo_llm):
+            if herramientas.es_modelo_openai_llm(modelo_llm):
+                from langchain_openai import ChatOpenAI
+                llm = ChatOpenAI(model=modelo_llm)
+            else:
+                llm = OllamaLLM(model=modelo_llm)
+        else:
+            return {"Mensaje": "No existe ese modelo de lenguaje."}
+    except Exception as e:
+        print(f"Error al inicializar modelo: {e}")
+        return {"error": f"Error al inicializar modelo: {e}"}
 
-    #No debe de crear la colección si no existe!
-    if funciones.existe_contexto(contexto):
-
-        try: 
-            print("Inicializando modelo de lenguaje: ", modelo_llm)
-            if funciones.existe_modelo(modelo_llm):
-                if herramientas.es_modelo_openai_llm(modelo_llm):
-                    from langchain_openai import ChatOpenAI
-                    llm = ChatOpenAI(model=modelo_llm)
-                else:
-                    llm = OllamaLLM(model=modelo_llm)
-            else: 
-                return {"Mensaje": "No existe ese modelo de lenguaje."}
-        except Exception as e:
-            print(f"Error al listar las colecciones: {e}")
-            return {"error": f"Error al listar las colecciones: {e}"}        
-
+    if sin_rag:
+        # Sin BC: respondemos sin retrieval. Le decimos al modelo explícitamente que
+        # no hay base de conocimiento para que no alucine que sí la tiene.
+        faq_text = "(Este asistente no tiene base de conocimiento asignada. Responde con conocimiento general.)"
+    else:
         vector_db = obtenContexto(contexto)
         retriever = vector_db.as_retriever()
-        retrieved_docs = retriever.invoke(user_question)    #get_relevant_documents ahora debería usar invoke o batch.
+        retrieved_docs = retriever.invoke(user_question)
         faq_text = retrieved_docs[0].page_content if retrieved_docs else "No hay información relevante."
 
-        # Formatea el historial para pasárselo al prompt
-        formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history])
+    # Formatea el historial para pasárselo al prompt
+    formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history])
 
-        # Construir prompt dinámico: si llegaron instrucciones, se envuelven; si no, fallback MIDE.
-        prompt = _build_prompt(instrucciones)
-        full_prompt = prompt.invoke({
-            "history": formatted_history,
-            "faq_text": faq_text,
-            "user_question": user_question
-        })
+    # Construir prompt dinámico: si llegaron instrucciones, se envuelven; si no, fallback MIDE.
+    prompt = _build_prompt(instrucciones)
+    full_prompt = prompt.invoke({
+        "history": formatted_history,
+        "faq_text": faq_text,
+        "user_question": user_question
+    })
 
-        # Genera la respuesta
-        response = llm.invoke(full_prompt)
+    # Genera la respuesta
+    response = llm.invoke(full_prompt)
 
-        # Uniformar respuesta a string plano:
-        # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
-        # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
-        # - OllamaLLM: response es str directo.
-        raw = response.content if hasattr(response, 'content') else response
-        return _extraer_texto_de_respuesta(raw)
-    
-    else:
-        return {"Mensaje": "No existe ese contexto."}
+    # Uniformar respuesta a string plano:
+    # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
+    # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
+    # - OllamaLLM: response es str directo.
+    raw = response.content if hasattr(response, 'content') else response
+    return _extraer_texto_de_respuesta(raw)

@@ -220,7 +220,7 @@ def init_agentes_db():
         slug              TEXT NOT NULL UNIQUE,
         nombre            TEXT NOT NULL,
         instrucciones     TEXT NOT NULL,
-        contexto          TEXT NOT NULL,
+        contexto          TEXT,
         modelo_llm        TEXT NOT NULL,
         historial_max     INTEGER NOT NULL DEFAULT 5,
         proyecto_id       TEXT NOT NULL,
@@ -234,11 +234,44 @@ def init_agentes_db():
     conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_slug ON agentes(slug)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_proyecto ON agentes(proyecto_id)')
 
-    # Migración idempotente para deploys existentes: agregar columnas color_* si faltan.
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(agentes)").fetchall()}
+    # Migración 1: agregar columnas color_* si faltan (deploys con schema previo).
+    cols_info = {row[1]: row for row in conn.execute("PRAGMA table_info(agentes)").fetchall()}
     for col in ('color_primario', 'color_burbuja_bot', 'color_fondo_chat', 'color_header'):
-        if col not in existing_cols:
+        if col not in cols_info:
             conn.execute(f'ALTER TABLE agentes ADD COLUMN {col} TEXT')
+
+    # Migración 2: relajar `contexto` a NULLABLE si en deploys previos quedó NOT NULL.
+    # SQLite no soporta ALTER COLUMN para quitar NOT NULL → rebuild de tabla.
+    # NULLIF(contexto,'') limpia los '' que dejaba el endpoint borrarContexto?force=true
+    # antes de existir esta columna nullable.
+    contexto_col = cols_info.get('contexto')
+    if contexto_col and contexto_col[3] == 1:  # notnull flag
+        logger.info("[MIGRATION] Relajando agentes.contexto a NULLABLE (rebuild de tabla, '' -> NULL).")
+        conn.execute('''CREATE TABLE agentes__new (
+            id                TEXT PRIMARY KEY,
+            slug              TEXT NOT NULL UNIQUE,
+            nombre            TEXT NOT NULL,
+            instrucciones     TEXT NOT NULL,
+            contexto          TEXT,
+            modelo_llm        TEXT NOT NULL,
+            historial_max     INTEGER NOT NULL DEFAULT 5,
+            proyecto_id       TEXT NOT NULL,
+            creado_en         TEXT NOT NULL,
+            actualizado_en    TEXT NOT NULL,
+            color_primario    TEXT,
+            color_burbuja_bot TEXT,
+            color_fondo_chat  TEXT,
+            color_header      TEXT
+        )''')
+        conn.execute('''INSERT INTO agentes__new
+            SELECT id, slug, nombre, instrucciones, NULLIF(contexto, ''),
+                   modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en,
+                   color_primario, color_burbuja_bot, color_fondo_chat, color_header
+            FROM agentes''')
+        conn.execute('DROP TABLE agentes')
+        conn.execute('ALTER TABLE agentes__new RENAME TO agentes')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_slug ON agentes(slug)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_agentes_proyecto ON agentes(proyecto_id)')
 
     conn.commit()
     conn.close()
@@ -383,7 +416,7 @@ class AgenteCreate(BaseModel):
     slug: str
     nombre: str
     instrucciones: str
-    contexto: str
+    contexto: Optional[str] = None
     modelo_llm: str
     historial_max: int = 5
     proyecto_id: str
@@ -412,7 +445,7 @@ class Agente(BaseModel):
     slug: str
     nombre: str
     instrucciones: str
-    contexto: str
+    contexto: Optional[str] = None
     modelo_llm: str
     historial_max: int
     proyecto_id: str
@@ -922,8 +955,7 @@ def chatbot(data: ChatRequest):
     # historial DEBE validar aquí el rango (entero 0-50). Hoy se recibe sin validar
     # porque no se usa, pero un valor fuera de rango (-5, 9999, str) pasa callando.
 
-    if not contexto_efectivo:
-        raise HTTPException(status_code=400, detail="contexto es requerido (envíalo en el body o asocia un agente con contexto).")
+    # contexto es opcional ahora: si no hay BC, chatbot.chat() responde en modo "chat puro" (sin RAG).
     if not modelo_efectivo:
         raise HTTPException(status_code=400, detail="modelo_llm es requerido (envíalo en el body o asocia un agente con modelo_llm).")
 
@@ -975,7 +1007,9 @@ def crear_agente(body: AgenteCreate):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     instrucciones = _validate_no_empty(body.instrucciones, "instrucciones")
-    contexto = _validate_no_empty(body.contexto, "contexto")
+    # contexto opcional: None o "" o "   " significan "sin BC" → guardar NULL.
+    contexto_raw = body.contexto.strip() if isinstance(body.contexto, str) else body.contexto
+    contexto = contexto_raw if contexto_raw else None
     modelo_llm = _validate_no_empty(body.modelo_llm, "modelo_llm")
     historial_max = _validate_historial_max(body.historial_max)
     color_primario = _validate_color(body.color_primario, "color_primario")
@@ -983,7 +1017,8 @@ def crear_agente(body: AgenteCreate):
     color_fondo_chat = _validate_color(body.color_fondo_chat, "color_fondo_chat")
     color_header = _validate_color(body.color_header, "color_header")
     _validate_proyecto_existe(body.proyecto_id)
-    _validate_bc_pertenece_a_proyecto(contexto, body.proyecto_id)
+    if contexto is not None:
+        _validate_bc_pertenece_a_proyecto(contexto, body.proyecto_id)
 
     aid = uuid.uuid4().hex
     now = _now()
@@ -1050,10 +1085,16 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             actual["instrucciones"] if body.instrucciones is None
             else _validate_no_empty(body.instrucciones, "instrucciones")
         )
-        contexto = (
-            actual["contexto"] if body.contexto is None
-            else _validate_no_empty(body.contexto, "contexto")
-        )
+        # `contexto` necesita distinción explícita "no enviado" vs "enviado como null/empty":
+        # null/empty es una solicitud explícita de DEJAR AL ASISTENTE SIN BC.
+        # Para el resto de campos NOT NULL, body.X is None ya significa "no enviado" sin
+        # ambigüedad porque el cliente nunca debería enviar null para ellos.
+        contexto_enviado = 'contexto' in body.model_fields_set
+        if contexto_enviado:
+            raw = body.contexto.strip() if isinstance(body.contexto, str) else body.contexto
+            contexto = raw if raw else None  # None | "" | "   " → None
+        else:
+            contexto = actual["contexto"]
         modelo_llm = (
             actual["modelo_llm"] if body.modelo_llm is None
             else _validate_no_empty(body.modelo_llm, "modelo_llm")
@@ -1086,10 +1127,11 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
         if body.proyecto_id is not None and body.proyecto_id != actual["proyecto_id"]:
             _validate_proyecto_existe(proyecto_id_efectivo)
 
-        # Si cambió contexto o proyecto_id, validar la consistencia BC↔proyecto
-        contexto_cambio = body.contexto is not None and contexto != actual["contexto"]
+        # Si cambió contexto o proyecto_id, validar la consistencia BC↔proyecto.
+        # Solo si contexto != None: limpiar BC (null) no requiere validación de pertenencia.
+        contexto_cambio = contexto_enviado and contexto != actual["contexto"]
         proyecto_cambio = body.proyecto_id is not None and proyecto_id_efectivo != actual["proyecto_id"]
-        if contexto_cambio or proyecto_cambio:
+        if (contexto_cambio or proyecto_cambio) and contexto is not None:
             _validate_bc_pertenece_a_proyecto(contexto, proyecto_id_efectivo)
 
         conn.execute(
