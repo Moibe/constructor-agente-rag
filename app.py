@@ -1272,6 +1272,30 @@ async def info_modelo(modelo: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al consultar info del modelo: {e}")
 
+@app.delete("/borrarModelo",
+            tags=["Modelos"],
+            description="Borra un modelo de Ollama vía su API nativa (DELETE /api/delete). No filtra nombres ni bloquea si hay asistentes usándolo: el admin confirma en el frontend.",
+            summary="Borrar Modelo")
+async def borrar_modelo(nombre: str):
+    OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+    try:
+        # Timeout más holgado que listar/info: el delete remueve archivos de disco
+        # y puede tardar varios segundos en modelos grandes.
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.request(
+                "DELETE", f"{OLLAMA_URL}/api/delete", json={"name": nombre}
+            )
+            if response.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Modelo '{nombre}' no encontrado en Ollama.")
+            response.raise_for_status()
+            return {"Mensaje": f"Modelo '{nombre}' borrado."}
+    except HTTPException:
+        raise
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar a Ollama: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al borrar modelo: {e}")
+
 @app.get("/health",
          tags=["Utilidad"],
          description="Verifica que el servidor esté en línea.",
