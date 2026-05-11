@@ -65,12 +65,32 @@ def _build_prompt(instrucciones: Optional[str]) -> PromptTemplate:
         input_variables=["history", "faq_text", "user_question"],
     )
 
+def _extract_tokens(response):
+    """Extrae (input_tokens, output_tokens) del response de LangChain.
+    - ChatOpenAI moderno expone `usage_metadata` (input_tokens/output_tokens).
+    - Fallback: response_metadata.token_usage (prompt_tokens/completion_tokens).
+    - OllamaLLM devuelve string sin metadatos → (None, None).
+    """
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        um = response.usage_metadata
+        return um.get('input_tokens'), um.get('output_tokens')
+    if hasattr(response, 'response_metadata'):
+        usage = (response.response_metadata or {}).get('token_usage', {}) if response.response_metadata else {}
+        return (usage.get('prompt_tokens') or usage.get('input_tokens'),
+                usage.get('completion_tokens') or usage.get('output_tokens'))
+    return None, None
+
+
 def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None):
+    """Devuelve dict:
+    - éxito: {"text": str, "tokens_input": int|None, "tokens_output": int|None}
+    - error: {"error_message": str}
+    """
     # Si llega contexto string-no-vacío, debe existir en Chroma. Si llega None/empty,
     # el agente está "sin BC" → modo chat puro (sin RAG).
     sin_rag = not contexto
     if not sin_rag and not funciones.existe_contexto(contexto):
-        return {"Mensaje": "No existe ese contexto."}
+        return {"error_message": "No existe ese contexto."}
 
     try:
         print("Inicializando modelo de lenguaje: ", modelo_llm)
@@ -81,10 +101,10 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
             else:
                 llm = OllamaLLM(model=modelo_llm)
         else:
-            return {"Mensaje": "No existe ese modelo de lenguaje."}
+            return {"error_message": "No existe ese modelo de lenguaje."}
     except Exception as e:
         print(f"Error al inicializar modelo: {e}")
-        return {"error": f"Error al inicializar modelo: {e}"}
+        return {"error_message": f"Error al inicializar modelo: {e}"}
 
     if sin_rag:
         # Sin BC: respondemos sin retrieval. Le decimos al modelo explícitamente que
@@ -115,4 +135,6 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
     # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
     # - OllamaLLM: response es str directo.
     raw = response.content if hasattr(response, 'content') else response
-    return _extraer_texto_de_respuesta(raw)
+    text = _extraer_texto_de_respuesta(raw)
+    tokens_input, tokens_output = _extract_tokens(response)
+    return {"text": text, "tokens_input": tokens_input, "tokens_output": tokens_output}

@@ -174,8 +174,19 @@ def init_log_db():
         historial TEXT,
         respuesta TEXT,
         ms INTEGER,
-        error TEXT
+        error TEXT,
+        agente_id TEXT,
+        tokens_input INTEGER,
+        tokens_output INTEGER
     )''')
+    # Migración idempotente para deploys con schema previo.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_logs)").fetchall()}
+    for col, typ in (('agente_id', 'TEXT'), ('tokens_input', 'INTEGER'), ('tokens_output', 'INTEGER')):
+        if col not in existing:
+            conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
+    # Índices para queries del dashboard de Consumo (rango de fechas + group by agente).
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_fecha ON chat_logs(fecha)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_agente_id ON chat_logs(agente_id)')
     conn.commit()
     conn.close()
 
@@ -427,6 +438,9 @@ class LogRequest(BaseModel):
     respuesta: str
     ms: int
     error: Optional[str] = None
+    agente_id: Optional[str] = None
+    tokens_input: Optional[int] = None
+    tokens_output: Optional[int] = None
 
 class AgenteCreate(BaseModel):
     slug: str
@@ -984,18 +998,57 @@ def chatbot(data: ChatRequest):
     print(f"Historial: {data.historial}")
     print(f"Agente: {data.agente_id}")
 
-    response = asistente.chat(
-        data.pregunta,
-        data.historial,
-        contexto_efectivo,
-        modelo_efectivo,
-        instrucciones=instrucciones_efectivas,
-    )
-    print("Respuesta: ", response)
-    if response:
-        return {"Mensaje": response}
-    else:
-        raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
+    import time
+    start_ts = time.perf_counter()
+    text = ""
+    tokens_input = None
+    tokens_output = None
+    error_str = None
+    try:
+        result = asistente.chat(
+            data.pregunta,
+            data.historial,
+            contexto_efectivo,
+            modelo_efectivo,
+            instrucciones=instrucciones_efectivas,
+        )
+        # chat() ahora devuelve dict: éxito con `text`+tokens, o error con `error_message`.
+        if isinstance(result, dict):
+            if "error_message" in result:
+                error_str = result["error_message"]
+            else:
+                text = result.get("text", "") or ""
+                tokens_input = result.get("tokens_input")
+                tokens_output = result.get("tokens_output")
+        else:
+            # Compat: si algún path devolviera string puro, tratarlo como texto.
+            text = str(result)
+    except Exception as e:
+        error_str = str(e)
+
+    elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
+    print("Respuesta:", text or f"<error: {error_str}>", f"({elapsed_ms} ms, tokens={tokens_input}/{tokens_output})")
+
+    # Persistir el log con tokens. No bloqueamos la respuesta si esto falla.
+    try:
+        conn = sqlite3.connect(LOG_DB_PATH)
+        conn.execute(
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
+             json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
+             text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as log_err:
+        logger.warning(f"[CHATBOT LOG] No se pudo escribir en chat_logs: {log_err}")
+
+    if error_str:
+        raise HTTPException(status_code=500, detail=error_str)
+    if text:
+        return {"Mensaje": text}
+    raise HTTPException(status_code=500, detail="Algo salió mal con la consulta.")
 
 @app.get("/agentes",
          tags=["Agentes"],
@@ -1197,10 +1250,11 @@ def registrar_log(data: LogRequest):
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (data.fecha, data.sesion, data.ambiente, data.modelo, data.contexto,
-             data.pregunta, data.historial, data.respuesta, data.ms, data.error)
+             data.pregunta, data.historial, data.respuesta, data.ms, data.error,
+             data.agente_id, data.tokens_input, data.tokens_output)
         )
         conn.commit()
         conn.close()
@@ -1208,6 +1262,193 @@ def registrar_log(data: LogRequest):
         return {"Mensaje": "Log registrado correctamente."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al registrar log: {e}")
+
+# Precios OpenAI por 1M tokens (input/output, USD).
+# Valores placeholder según el handoff — VERIFICAR contra pricing oficial al desplegar.
+_OPENAI_PRICING = {
+    'gpt-5':       {'input': 1.25, 'output': 10.00},
+    'gpt-5-mini':  {'input': 0.25, 'output':  2.00},
+    'gpt-5-nano':  {'input': 0.05, 'output':  0.40},
+    'gpt-4o':      {'input': 2.50, 'output': 10.00},
+    'gpt-4o-mini': {'input': 0.15, 'output':  0.60},
+}
+
+
+def _pricing_for(modelo: Optional[str]):
+    """Devuelve el entry de _OPENAI_PRICING que matchea el modelo (longest-prefix).
+    Soporta nombres con sufijo (ej. 'gpt-4o-2024-08-06' → 'gpt-4o', 'gpt-4o-mini' → 'gpt-4o-mini')."""
+    if not modelo:
+        return None
+    m = modelo.lower()
+    # Longest-prefix match para que 'gpt-4o-mini' no caiga en 'gpt-4o'.
+    best = None
+    for key, pricing in _OPENAI_PRICING.items():
+        if m.startswith(key) and (best is None or len(key) > len(best[0])):
+            best = (key, pricing)
+    return best[1] if best else None
+
+
+@app.get("/consumo/resumen",
+         tags=["Consumo"],
+         description="Métricas agregadas del periodo (por defecto últimos 30 días). Fuente: logs.db + agentes.db + Chroma. Pensado para el dashboard de Consumo del admin.",
+         summary="Resumen de Consumo")
+def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
+    from datetime import date, timedelta
+
+    today = date.today()
+    try:
+        hasta_date = date.fromisoformat(hasta) if hasta else today
+        desde_date = date.fromisoformat(desde) if desde else (hasta_date - timedelta(days=30))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="desde/hasta deben tener formato YYYY-MM-DD.")
+
+    desde_str = desde_date.isoformat()
+    hasta_str = hasta_date.isoformat()
+    # Rango inclusivo: [desde 00:00, hasta+1día 00:00). Funciona con timestamps ISO
+    # gracias al orden lexicográfico.
+    upper_exclusive = (hasta_date + timedelta(days=1)).isoformat()
+
+    conn = sqlite3.connect(LOG_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?",
+            (desde_str, upper_exclusive),
+        ).fetchone()
+        llamadas_total = total_row["c"]
+
+        errores_row = conn.execute(
+            "SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? AND error IS NOT NULL AND error != ''",
+            (desde_str, upper_exclusive),
+        ).fetchone()
+        errores_total = errores_row["c"]
+
+        lat_row = conn.execute(
+            "SELECT AVG(ms) AS a FROM chat_logs WHERE fecha >= ? AND fecha < ? AND (error IS NULL OR error = '') AND ms IS NOT NULL",
+            (desde_str, upper_exclusive),
+        ).fetchone()
+        latencia_promedio_ms = int(lat_row["a"]) if lat_row["a"] is not None else None
+
+        dia_rows = conn.execute(
+            "SELECT substr(fecha, 1, 10) AS dia, COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? GROUP BY dia ORDER BY dia ASC",
+            (desde_str, upper_exclusive),
+        ).fetchall()
+        llamadas_por_dia = [{"fecha": r["dia"], "count": r["c"]} for r in dia_rows]
+
+        agente_rows = conn.execute(
+            """SELECT agente_id,
+                      COUNT(*) AS total,
+                      SUM(CASE WHEN error IS NOT NULL AND error != '' THEN 1 ELSE 0 END) AS errores,
+                      AVG(CASE WHEN (error IS NULL OR error = '') THEN ms END) AS lat
+               FROM chat_logs
+               WHERE fecha >= ? AND fecha < ?
+               GROUP BY agente_id
+               ORDER BY total DESC""",
+            (desde_str, upper_exclusive),
+        ).fetchall()
+
+        token_rows = conn.execute(
+            """SELECT modelo,
+                      COALESCE(SUM(tokens_input), 0) AS ti,
+                      COALESCE(SUM(tokens_output), 0) AS toc
+               FROM chat_logs
+               WHERE fecha >= ? AND fecha < ?
+                 AND (tokens_input IS NOT NULL OR tokens_output IS NOT NULL)
+               GROUP BY modelo""",
+            (desde_str, upper_exclusive),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # JOIN manual con agentes (BD distinta) para slug/nombre.
+    conn_ag = _agentes_connection()
+    try:
+        agentes_map = {
+            r["id"]: {"slug": r["slug"], "nombre": r["nombre"]}
+            for r in conn_ag.execute("SELECT id, slug, nombre FROM agentes").fetchall()
+        }
+    finally:
+        conn_ag.close()
+
+    llamadas_por_asistente = []
+    for r in agente_rows:
+        info = agentes_map.get(r["agente_id"], {"slug": "<borrado>", "nombre": "<borrado>"})
+        llamadas_por_asistente.append({
+            "slug": info["slug"],
+            "nombre": info["nombre"],
+            "count": r["total"],
+            "errores": r["errores"] or 0,
+            "latencia_promedio_ms": int(r["lat"]) if r["lat"] is not None else None,
+        })
+
+    # Tokens OpenAI: agregamos por modelo y calculamos costo con tabla local.
+    por_modelo = []
+    tokens_input_total = 0
+    tokens_output_total = 0
+    costo_total = 0.0
+    for r in token_rows:
+        modelo = r["modelo"] or ""
+        ti = int(r["ti"] or 0)
+        to = int(r["toc"] or 0)
+        if ti == 0 and to == 0:
+            continue
+        pricing = _pricing_for(modelo)
+        if pricing is None:
+            # Modelos no-OpenAI (Ollama) o no reconocidos: no van al breakdown ni al total.
+            continue
+        costo = (ti / 1_000_000) * pricing['input'] + (to / 1_000_000) * pricing['output']
+        por_modelo.append({
+            "modelo": modelo,
+            "input": ti,
+            "output": to,
+            "costo_usd_estimado": round(costo, 4),
+        })
+        tokens_input_total += ti
+        tokens_output_total += to
+        costo_total += costo
+
+    tokens_openai = {
+        "input": tokens_input_total,
+        "output": tokens_output_total,
+        "costo_usd_estimado": round(costo_total, 4),
+        "por_modelo": por_modelo,
+    }
+
+    # Documentos: contar BCs de Chroma y sumar archivos vía funciones.listar_documentos.
+    total_bcs = 0
+    total_documentos = 0
+    try:
+        import chromadb
+        chroma_client = chromadb.PersistentClient(path=os.getenv('CHROMA_PATH', 'chroma'))
+        bcs = chroma_client.list_collections()
+        total_bcs = len(bcs)
+        for col in bcs:
+            try:
+                docs = funciones.listar_documentos(col.name)
+                if isinstance(docs, list):
+                    total_documentos += len(docs)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"[CONSUMO] No se pudo contar BCs/documentos en Chroma: {e}")
+
+    return {
+        "rango": {"desde": desde_str, "hasta": hasta_str},
+        "llamadas_chatbot_total": llamadas_total,
+        "llamadas_chatbot_por_dia": llamadas_por_dia,
+        "errores_total": errores_total,
+        "latencia_promedio_ms": latencia_promedio_ms,
+        "llamadas_por_asistente": llamadas_por_asistente,
+        "tokens_openai": tokens_openai,
+        "documentos": {
+            "total_bcs": total_bcs,
+            "total_documentos": total_documentos,
+            # Tamaño en disco no es trivial (Chroma no expone tamaño de archivo
+            # original); el handoff permite devolver null.
+            "tamano_total_kb": None,
+        },
+    }
+
 
 @app.get("/listarModelos",
          tags=["Modelos"],
