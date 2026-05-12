@@ -217,16 +217,29 @@ def init_log_db():
         error TEXT,
         agente_id TEXT,
         tokens_input INTEGER,
-        tokens_output INTEGER
+        tokens_output INTEGER,
+        proyecto_id TEXT,
+        proyecto_slug TEXT,
+        asistente_slug TEXT
     )''')
     # Migración idempotente para deploys con schema previo.
     existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_logs)").fetchall()}
-    for col, typ in (('agente_id', 'TEXT'), ('tokens_input', 'INTEGER'), ('tokens_output', 'INTEGER')):
+    for col, typ in (
+        ('agente_id', 'TEXT'),
+        ('tokens_input', 'INTEGER'),
+        ('tokens_output', 'INTEGER'),
+        ('proyecto_id', 'TEXT'),
+        ('proyecto_slug', 'TEXT'),
+        ('asistente_slug', 'TEXT'),
+    ):
         if col not in existing:
             conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
-    # Índices para queries del dashboard de Consumo (rango de fechas + group by agente).
+    # Índices para queries del dashboard de Consumo y de Registros
+    # (rango por fecha, group by agente, filtros por proyecto/asistente slug).
     conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_fecha ON chat_logs(fecha)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_agente_id ON chat_logs(agente_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_proyecto_slug ON chat_logs(proyecto_slug)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_asistente_slug ON chat_logs(asistente_slug)')
     conn.commit()
     conn.close()
 
@@ -1047,13 +1060,17 @@ def verificar_password_proyecto(pid: str, body: VerificarPasswordRequest):
 @app.post("/chatbot",
           tags=["Chatbot"])
 def chatbot(data: ChatRequest):
-    # Resolver bundle del agente si viene agente_id; si no, modo legacy
+    # Resolver bundle del agente si viene agente_id; si no, modo legacy.
+    # LEFT JOIN con proyectos para tener `proyecto_slug` disponible al loguear
+    # (denormalizado en chat_logs para que /registros pueda filtrar sin JOIN).
     base = {}
     if data.agente_id is not None:
         conn = _agentes_connection()
         try:
             row = conn.execute(
-                f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
+                """SELECT a.*, p.slug AS proyecto_slug
+                   FROM agentes a LEFT JOIN proyectos p ON a.proyecto_id = p.id
+                   WHERE a.id = ?""",
                 (data.agente_id,),
             ).fetchone()
             if not row:
@@ -1115,15 +1132,18 @@ def chatbot(data: ChatRequest):
     elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
     print("Respuesta:", text or f"<error: {error_str}>", f"({elapsed_ms} ms, tokens={tokens_input}/{tokens_output})")
 
-    # Persistir el log con tokens. No bloqueamos la respuesta si esto falla.
+    # Persistir el log con tokens y los slugs denormalizados (para que /registros
+    # pueda filtrar por proyecto/asistente sin JOIN). No bloqueamos la respuesta
+    # si esto falla.
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
              json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
-             text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output)
+             text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output,
+             base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"))
         )
         conn.commit()
         conn.close()
@@ -1533,6 +1553,107 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
             # original); el handoff permite devolver null.
             "tamano_total_kb": None,
         },
+    }
+
+
+@app.get("/registros",
+         tags=["Consumo"],
+         description="Auditoría detallada de interacciones con /chatbot. Filtros opcionales por rango de fechas, proyecto, asistente, errores. Paginación con limit (max 200) y offset. Requiere token admin.",
+         summary="Listar Registros")
+def listar_registros(
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    proyecto: Optional[str] = None,
+    asistente: Optional[str] = None,
+    solo_errores: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+    _: bool = Depends(require_admin),
+):
+    from datetime import date, timedelta, datetime, timezone
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit debe estar entre 1 y 200.")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset debe ser >= 0.")
+
+    # UTC, no local: los timestamps en chat_logs son UTC, así que el rango
+    # default ("últimos 7 días") tiene que estar en la misma zona para no
+    # excluir filas de "hoy" cerca de medianoche UTC.
+    today = datetime.now(timezone.utc).date()
+    try:
+        hasta_date = date.fromisoformat(hasta) if hasta else today
+        desde_date = date.fromisoformat(desde) if desde else (hasta_date - timedelta(days=7))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="desde/hasta deben tener formato YYYY-MM-DD.")
+
+    if desde_date > hasta_date:
+        raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta.")
+
+    desde_str = desde_date.isoformat()
+    upper_exclusive = (hasta_date + timedelta(days=1)).isoformat()
+
+    # WHERE dinámico: arrancamos con el rango de fechas y agregamos los filtros
+    # opcionales. Usar parametrización SQLite (no concatenar strings) para evitar
+    # injection.
+    where_clauses = ["fecha >= ?", "fecha < ?"]
+    where_params = [desde_str, upper_exclusive]
+    if proyecto:
+        where_clauses.append("proyecto_slug = ?")
+        where_params.append(proyecto)
+    if asistente:
+        where_clauses.append("asistente_slug = ?")
+        where_params.append(asistente)
+    if solo_errores:
+        where_clauses.append("error IS NOT NULL AND error != ''")
+
+    where_sql = " AND ".join(where_clauses)
+
+    conn = sqlite3.connect(LOG_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) AS c FROM chat_logs WHERE {where_sql}",
+            where_params,
+        ).fetchone()["c"]
+
+        rows = conn.execute(
+            f"""SELECT id, fecha, proyecto_id, proyecto_slug, asistente_slug,
+                       pregunta, respuesta, ms, tokens_input, tokens_output,
+                       modelo, error
+                FROM chat_logs
+                WHERE {where_sql}
+                ORDER BY fecha DESC, id DESC
+                LIMIT ? OFFSET ?""",
+            where_params + [limit, offset],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items = [
+        {
+            "id": r["id"],
+            "timestamp": r["fecha"],
+            "proyecto_id": r["proyecto_id"],
+            "proyecto_slug": r["proyecto_slug"],
+            "asistente_slug": r["asistente_slug"],
+            "pregunta": r["pregunta"],
+            "respuesta": r["respuesta"],
+            "latencia_ms": r["ms"],
+            "tokens_in": r["tokens_input"],
+            "tokens_out": r["tokens_output"],
+            "modelo": r["modelo"],
+            "error": r["error"],
+        }
+        for r in rows
+    ]
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "rango": {"desde": desde_date.isoformat(), "hasta": hasta_date.isoformat()},
     }
 
 
