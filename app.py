@@ -116,6 +116,29 @@ def _validate_color(value: Optional[str], field_name: str) -> Optional[str]:
         raise HTTPException(status_code=400, detail=f"{field_name} excede 9 caracteres.")
     return s
 
+def _validate_proyecto_password(value: Optional[str]) -> Optional[str]:
+    """Password de proyecto: string trimmed, len <= 120. Empty/whitespace → None
+    (semánticamente "sin password")."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="password debe ser string.")
+    s = value.strip()
+    if not s:
+        return None
+    if len(s) > 120:
+        raise HTTPException(status_code=400, detail="password excede 120 caracteres.")
+    return s
+
+
+def _proyecto_to_response(row: dict) -> dict:
+    """Convierte una fila de `proyectos` a la respuesta pública: elimina el
+    campo `password` (NUNCA debe exponerse) y agrega `requires_password: bool`."""
+    out = {k: v for k, v in row.items() if k != "password"}
+    out["requires_password"] = bool(row.get("password"))
+    return out
+
+
 def _validate_descripcion(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -328,9 +351,14 @@ def init_proyectos_db():
         nombre         TEXT NOT NULL,
         descripcion    TEXT,
         creado_en      TEXT NOT NULL,
-        actualizado_en TEXT NOT NULL
+        actualizado_en TEXT NOT NULL,
+        password       TEXT
     )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_proyectos_slug ON proyectos(slug)')
+    # Migración idempotente: agregar columna password si falta (deploys previos).
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(proyectos)").fetchall()}
+    if 'password' not in existing:
+        conn.execute('ALTER TABLE proyectos ADD COLUMN password TEXT')
     conn.commit()
     conn.close()
 
@@ -510,21 +538,29 @@ class ProyectoCreate(BaseModel):
     slug: str
     nombre: str
     descripcion: Optional[str] = None
+    password: Optional[str] = None
 
 class ProyectoUpdate(BaseModel):
     nombre: Optional[str] = None
     descripcion: Optional[str] = None
+    password: Optional[str] = None
     # Sentinels para detectar intentos de modificar campos inmutables
     id: Optional[str] = None
     slug: Optional[str] = None
 
 class Proyecto(BaseModel):
+    # NOTA: `password` NUNCA va en la respuesta; el endpoint público devuelve
+    # `requires_password: bool` calculado server-side.
     id: str
     slug: str
     nombre: str
     descripcion: Optional[str]
     creado_en: str
     actualizado_en: str
+    requires_password: bool
+
+class VerificarPasswordRequest(BaseModel):
+    password: Optional[str] = None
 
 @app.get("/listarContextos",
          tags=["Contextos"])
@@ -839,7 +875,7 @@ def borrar_documento(data: DeleteRequest):
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
 _AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header, mensaje_inicial"
-_PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en"
+_PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en, password"
 
 @app.get("/proyectos",
          tags=["Proyectos"],
@@ -851,7 +887,7 @@ def listar_proyectos():
         rows = conn.execute(
             f"SELECT {_PROYECTO_COLS} FROM proyectos ORDER BY creado_en DESC"
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_proyecto_to_response(dict(r)) for r in rows]
     finally:
         conn.close()
 
@@ -864,6 +900,7 @@ def crear_proyecto(body: ProyectoCreate, _: bool = Depends(require_admin)):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     descripcion = _validate_descripcion(body.descripcion)
+    password = _validate_proyecto_password(body.password)
 
     pid = uuid.uuid4().hex
     now = _now()
@@ -874,15 +911,15 @@ def crear_proyecto(body: ProyectoCreate, _: bool = Depends(require_admin)):
             raise HTTPException(status_code=409, detail=f"Ya existe un proyecto con slug '{slug}'.")
 
         conn.execute(
-            f"INSERT INTO proyectos ({_PROYECTO_COLS}) VALUES (?, ?, ?, ?, ?, ?)",
-            (pid, slug, nombre, descripcion, now, now),
+            f"INSERT INTO proyectos ({_PROYECTO_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pid, slug, nombre, descripcion, now, now, password),
         )
         conn.commit()
         row = conn.execute(
             f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
             (pid,),
         ).fetchone()
-        return dict(row)
+        return _proyecto_to_response(dict(row))
     finally:
         conn.close()
 
@@ -899,7 +936,7 @@ def obtener_proyecto(pid: str):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
-        return dict(row)
+        return _proyecto_to_response(dict(row))
     finally:
         conn.close()
 
@@ -928,17 +965,23 @@ def actualizar_proyecto(pid: str, body: ProyectoUpdate, _: bool = Depends(requir
             actual["descripcion"] if body.descripcion is None
             else _validate_descripcion(body.descripcion)
         )
+        # `password`: igual que `contexto`/`mensaje_inicial`, distinguir
+        # "no enviado" (preservar) de "enviado como null/empty" (quitar password).
+        if 'password' in body.model_fields_set:
+            password = _validate_proyecto_password(body.password)
+        else:
+            password = actual["password"]
 
         conn.execute(
-            "UPDATE proyectos SET nombre=?, descripcion=?, actualizado_en=? WHERE id=?",
-            (nombre, descripcion, _now(), pid),
+            "UPDATE proyectos SET nombre=?, descripcion=?, password=?, actualizado_en=? WHERE id=?",
+            (nombre, descripcion, password, _now(), pid),
         )
         conn.commit()
         row = conn.execute(
             f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
             (pid,),
         ).fetchone()
-        return dict(row)
+        return _proyecto_to_response(dict(row))
     finally:
         conn.close()
 
@@ -974,6 +1017,32 @@ def borrar_proyecto(pid: str, _: bool = Depends(require_admin)):
         conn.commit()
     finally:
         conn.close()
+
+@app.post("/proyectos/{pid}/verificar-password",
+          tags=["Proyectos"],
+          description="Verifica el password de un proyecto. NO requiere token admin: este endpoint lo usan los usuarios normales para entrar a su proyecto. Si el proyecto no tiene password, cualquier valor (o vacío) lo acepta.",
+          summary="Verificar Password de Proyecto")
+def verificar_password_proyecto(pid: str, body: VerificarPasswordRequest):
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(
+            "SELECT password FROM proyectos WHERE id=?", (pid,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
+        stored = row["password"]
+    finally:
+        conn.close()
+
+    # Sin password configurado → acceso libre. Equivale al comportamiento previo
+    # a este feature, así que clientes viejos no se rompen.
+    if not stored:
+        return {"ok": True}
+
+    if body.password is not None and body.password == stored:
+        return {"ok": True}
+
+    raise HTTPException(status_code=401, detail="Password incorrecto")
 
 @app.post("/chatbot",
           tags=["Chatbot"])
