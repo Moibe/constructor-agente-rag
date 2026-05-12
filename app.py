@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import Optional
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 import funciones
 import chatbot as asistente
@@ -160,6 +160,23 @@ def _validate_bc_pertenece_a_proyecto(nombre_chroma: str, proyecto_id: str):
             )
     finally:
         conn.close()
+
+def require_admin(authorization: Optional[str] = Header(default=None)) -> bool:
+    """Dependencia FastAPI: exige `Authorization: Bearer <ADMIN_PASSWORD>`.
+    El password se compara contra `ADMIN_PASSWORD` del .env del server.
+    Levanta 401 si falta header, formato malo o token incorrecto.
+    Levanta 500 si el server no tiene `ADMIN_PASSWORD` configurado (mejor
+    fallar ruidosamente que abrirse a todo el mundo)."""
+    expected = os.getenv("ADMIN_PASSWORD")
+    if not expected:
+        raise HTTPException(status_code=500, detail="ADMIN_PASSWORD no configurado en server")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token admin requerido")
+    token = authorization[len("Bearer "):].strip()
+    if token != expected:
+        raise HTTPException(status_code=401, detail="Token admin inválido")
+    return True
+
 
 def init_log_db():
     conn = sqlite3.connect(LOG_DB_PATH)
@@ -841,9 +858,9 @@ def listar_proyectos():
 @app.post("/proyectos",
           tags=["Proyectos"],
           status_code=201,
-          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes.",
+          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes. Requiere token admin.",
           summary="Crear Proyecto")
-def crear_proyecto(body: ProyectoCreate):
+def crear_proyecto(body: ProyectoCreate, _: bool = Depends(require_admin)):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     descripcion = _validate_descripcion(body.descripcion)
@@ -888,9 +905,9 @@ def obtener_proyecto(pid: str):
 
 @app.put("/proyectos/{pid}",
          tags=["Proyectos"],
-         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables.",
+         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables. Requiere token admin.",
          summary="Actualizar Proyecto")
-def actualizar_proyecto(pid: str, body: ProyectoUpdate):
+def actualizar_proyecto(pid: str, body: ProyectoUpdate, _: bool = Depends(require_admin)):
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
     if body.slug is not None:
@@ -928,9 +945,9 @@ def actualizar_proyecto(pid: str, body: ProyectoUpdate):
 @app.delete("/proyectos/{pid}",
             tags=["Proyectos"],
             status_code=204,
-            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados.",
+            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados. Requiere token admin.",
             summary="Borrar Proyecto")
-def borrar_proyecto(pid: str):
+def borrar_proyecto(pid: str, _: bool = Depends(require_admin)):
     conn = _agentes_connection()
     try:
         row = conn.execute("SELECT id FROM proyectos WHERE id=?", (pid,)).fetchone()
@@ -1515,9 +1532,9 @@ async def info_modelo(modelo: str):
 
 @app.delete("/borrarModelo",
             tags=["Modelos"],
-            description="Borra un modelo de Ollama vía su API nativa (DELETE /api/delete). No filtra nombres ni bloquea si hay asistentes usándolo: el admin confirma en el frontend.",
+            description="Borra un modelo de Ollama vía su API nativa (DELETE /api/delete). No filtra nombres ni bloquea si hay asistentes usándolo: el admin confirma en el frontend. Requiere token admin.",
             summary="Borrar Modelo")
-async def borrar_modelo(nombre: str):
+async def borrar_modelo(nombre: str, _: bool = Depends(require_admin)):
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     try:
         # Timeout más holgado que listar/info: el delete remueve archivos de disco
@@ -1543,6 +1560,14 @@ async def borrar_modelo(nombre: str):
          summary="Health Check")
 def health():
     return {"status": "ok", "mensaje": "Servidor en línea"}
+
+
+@app.post("/admin/verify",
+          tags=["Admin"],
+          description="Valida el token admin (Authorization: Bearer <token>). El frontend lo llama al pegar la URL con el param para confirmar antes de persistirlo en localStorage.",
+          summary="Verificar token admin")
+def admin_verify(_: bool = Depends(require_admin)):
+    return {"ok": True}
 
 if __name__ == '__main__':
     import uvicorn
