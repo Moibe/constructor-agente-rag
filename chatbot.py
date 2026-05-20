@@ -81,10 +81,14 @@ def _extract_tokens(response):
     return None, None
 
 
-def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None):
+def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None, top_k: int = 1):
     """Devuelve dict:
     - éxito: {"text": str, "tokens_input": int|None, "tokens_output": int|None}
     - error: {"error_message": str}
+
+    `top_k`: cuántos chunks recuperar de Chroma y pasar al LLM. Default 1
+    (comportamiento histórico para FAQs autocontenidos). Para PDFs informativos
+    o BCs con respuestas distribuidas en varios chunks, conviene subirlo a 3-5.
     """
     # Si llega contexto string-no-vacío, debe existir en Chroma. Si llega None/empty,
     # el agente está "sin BC" → modo chat puro (sin RAG).
@@ -111,10 +115,20 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
         # no hay base de conocimiento para que no alucine que sí la tiene.
         faq_text = "(Este asistente no tiene base de conocimiento asignada. Responde con conocimiento general.)"
     else:
+        # `k` controla cuántos chunks pide langchain a Chroma. Hasta antes de este
+        # cambio no se pasaba explícito → langchain usaba su default (k=4) pero
+        # acá solo se usaba retrieved_docs[0], desperdiciando 3 búsquedas. Ahora
+        # pedimos exactamente `top_k` y concatenamos todo lo que vuelva.
         vector_db = obtenContexto(contexto)
-        retriever = vector_db.as_retriever()
+        retriever = vector_db.as_retriever(search_kwargs={"k": max(1, top_k)})
         retrieved_docs = retriever.invoke(user_question)
-        faq_text = retrieved_docs[0].page_content if retrieved_docs else "No hay información relevante."
+        if retrieved_docs:
+            # Separador explícito entre chunks para que el LLM los pueda distinguir
+            # cuando hay varios (importante para PDFs informativos con respuestas
+            # repartidas; irrelevante con top_k=1).
+            faq_text = "\n\n---\n\n".join(d.page_content for d in retrieved_docs)
+        else:
+            faq_text = "No hay información relevante."
 
     # Formatea el historial para pasárselo al prompt
     formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history])
