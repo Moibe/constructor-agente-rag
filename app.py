@@ -13,6 +13,8 @@ from pydantic import BaseModel
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+import mimetypes
 import funciones
 import chatbot as asistente
 import generacion_aumentada
@@ -115,6 +117,17 @@ def _validate_color(value: Optional[str], field_name: str) -> Optional[str]:
     if len(s) > 9:
         raise HTTPException(status_code=400, detail=f"{field_name} excede 9 caracteres.")
     return s
+
+def _validate_doc_path_part(value: str, field: str) -> str:
+    """Sanitiza una parte de path (contexto o filename) que se va a concatenar al
+    DOCS_FOLDER. Rechaza separadores de path, '..' y null bytes para evitar
+    path traversal. NO sanitiza silenciosamente — devuelve 400 si detecta algo."""
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{field} es requerido.")
+    if '/' in value or '\\' in value or '..' in value or '\x00' in value:
+        raise HTTPException(status_code=400, detail=f"{field} contiene caracteres no permitidos.")
+    return value
+
 
 def _validate_proyecto_password(value: Optional[str]) -> Optional[str]:
     """Password de proyecto: string trimmed, len <= 120. Empty/whitespace → None
@@ -467,6 +480,12 @@ app.add_middleware(
 # Carpeta temporal para uploads de documentos antes de embeber.
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 Path(TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
+
+# Carpeta donde se persisten los binarios originales subidos vía /integrarDocumento,
+# para servirlos de vuelta desde /obtenerDocumento. Estructura:
+#   <DOCS_FOLDER>/<contexto>/<filename>
+DOCS_FOLDER = os.getenv('DOCS_FOLDER', './data/documentos')
+Path(DOCS_FOLDER).mkdir(parents=True, exist_ok=True)
 
 class ChatRequest(BaseModel):
     pregunta: str
@@ -845,6 +864,16 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             
             if resultado['success']:
                 print("Documento integrado exitosamente..")
+                # Persistir el binario original en DOCS_FOLDER/<contexto>/<filename>
+                # para servirlo después vía /obtenerDocumento. Si falla, no rompe
+                # la respuesta exitosa del embed — solo queda como "histórico sin
+                # binario" (404 al servir). El RAG funciona igual.
+                try:
+                    docs_ctx_dir = Path(DOCS_FOLDER) / contexto
+                    docs_ctx_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(file_path, docs_ctx_dir / documento.filename)
+                except Exception as persist_err:
+                    logger.warning(f"[INGESTA] No se pudo persistir binario '{documento.filename}' en {DOCS_FOLDER}/{contexto}: {persist_err}")
                 return {"mensaje": resultado['message']}
             else:
                 print(f"Error al embeber archivo: {resultado['message']}")
@@ -863,6 +892,46 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             os.remove(file_path)
     else: 
         return {"mensaje": f"No existe el contexto {contexto} al que quieres integrar el documento."}
+
+
+@app.get("/obtenerDocumento",
+         tags=["Documentos"],
+         description="Sirve el binario original de un documento ingresado previamente a una BC. Devuelve Content-Disposition inline para que el navegador previsualice PDFs en vez de forzar descarga. Sin auth: el contexto es un nombre interno conocido solo desde el admin.",
+         summary="Obtener Documento")
+def obtener_documento(contexto: str, filename: str):
+    _validate_doc_path_part(contexto, "contexto")
+    _validate_doc_path_part(filename, "filename")
+
+    if not funciones.existe_contexto(contexto):
+        raise HTTPException(status_code=404, detail=f"Contexto '{contexto}' no existe.")
+
+    file_path = Path(DOCS_FOLDER) / contexto / filename
+    # Defense-in-depth: resolver y verificar que el path resuelto siga dentro de DOCS_FOLDER.
+    # `_validate_doc_path_part` ya rechaza '..' y separadores, pero un resolve() final
+    # protege contra cosas como symlinks que escapan.
+    try:
+        resolved = file_path.resolve(strict=False)
+        base = Path(DOCS_FOLDER).resolve(strict=False)
+        if base not in resolved.parents:
+            raise HTTPException(status_code=400, detail="filename fuera del directorio permitido.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="filename inválido.")
+
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Documento '{filename}' no encontrado en el contexto '{contexto}'.")
+
+    mime, _ = mimetypes.guess_type(filename)
+    return FileResponse(
+        path=str(file_path),
+        media_type=mime or "application/octet-stream",
+        headers={
+            # `inline` => el navegador previsualiza PDFs en lugar de descargarlos.
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
 
 
 @app.delete("/quitarDocumento",
