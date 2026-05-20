@@ -2,6 +2,7 @@
 /chroma/
 /__pycache__/
 /_temp/
+/data/
 .claude/
 hooks.json
 debug_mide.log*
