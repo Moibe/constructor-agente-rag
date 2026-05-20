@@ -41,6 +41,67 @@ def load_and_split_data(file_path, chunk_size=7500, chunk_overlap=100):
 
     return chunks
 
+def embed_text(content: str, filename: str, nombre_contexto: str, current_hash: str):
+    """
+    Embebe un snippet de TEXTO PLANO (no PDF) en el contexto. Mismo flujo que
+    embed() pero sin pasar por UnstructuredPDFLoader: splitter directo sobre el
+    string.
+
+    El `source` que se guarda en metadata es os.path.join(TEMP_FOLDER, filename)
+    — mismo formato que usa UnstructuredPDFLoader al cargar un PDF desde
+    TEMP_FOLDER. Eso garantiza que funciones.listar_documentos y
+    funciones.borrar_documento traten al snippet idéntico que a un PDF.
+
+    Returns:
+        dict: {'success': bool, 'message': str, 'error_details': str (opcional)}
+    """
+    try:
+        print("="*50, flush=True)
+        print(f"[INICIO] embed_text() para: {nombre_contexto}", flush=True)
+        print(f"[*] Filename virtual: {filename}", flush=True)
+        print(f"[*] Tamaño contenido: {len(content)} chars", flush=True)
+        print("="*50, flush=True)
+
+        chunk_size = herramientas.obtener_chunk_size_de_coleccion(nombre_contexto)
+        print(f"[OK] Usando chunk_size={chunk_size}", flush=True)
+
+        source_path = os.path.join(TEMP_FOLDER, filename)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=100)
+        chunks = text_splitter.create_documents(
+            [content],
+            metadatas=[{"source": source_path}],
+        )
+        if not chunks:
+            return {'success': False, 'message': 'No se pudieron generar chunks del snippet', 'error_details': 'Contenido vacío después del split'}
+
+        print(f"[OK] Se generaron {len(chunks)} chunks", flush=True)
+
+        modelo_embedding = obtener_modelo_embedding_de_contexto(nombre_contexto)
+        if not modelo_embedding:
+            return {'success': False, 'message': 'No se pudo obtener el modelo de embedding del contexto', 'error_details': f'Contexto: {nombre_contexto}'}
+
+        for chunk in chunks:
+            chunk.metadata['file_hash'] = current_hash
+            chunk.metadata['embedding_model_name'] = modelo_embedding
+
+        db = herramientas.obtenContexto(nombre_contexto)
+        if not db:
+            return {'success': False, 'message': 'No se pudo obtener la base de datos del contexto', 'error_details': f'Contexto: {nombre_contexto}'}
+
+        db.add_documents(chunks)
+        print(f"[OK] Snippet añadido al contexto {nombre_contexto}", flush=True)
+
+        return {'success': True, 'message': f'Snippet procesado correctamente. {len(chunks)} chunks añadidos.'}
+
+    except Exception as e:
+        error_message = f"Error durante el embed del snippet: {str(e)}"
+        error_details = f"Tipo: {type(e).__name__}, Contexto: {nombre_contexto}, Filename: {filename}"
+        print(f"[ERROR] {error_message}")
+        import traceback
+        traceback.print_exc()
+        return {'success': False, 'message': error_message, 'error_details': error_details}
+
+
 def embed(file_path, nombre_contexto, current_hash):
     """
     Toma un path de archivo, carga, divide, y embebe el contenido en el contexto elegido.

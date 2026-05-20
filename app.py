@@ -516,6 +516,11 @@ class ChatRequest(BaseModel):
     historial_max: Optional[int] = None
     top_k: Optional[int] = None
 
+class SnippetRequest(BaseModel):
+    filename: str
+    contenido: str
+
+
 class DeleteRequest(BaseModel):
     """
     Modelo Pydantic para el cuerpo de la solicitud DELETE, 
@@ -913,8 +918,60 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
         finally:
             # Eliminar el archivo temporal
             os.remove(file_path)
-    else: 
+    else:
         return {"mensaje": f"No existe el contexto {contexto} al que quieres integrar el documento."}
+
+
+@app.post("/agregarSnippet",
+          tags=["Documentos"],
+          description="Añade un snippet de TEXTO PLANO a una BC sin necesidad de subir un PDF. Útil para incorporar una Q&A puntual o una nota corta. El `filename` actúa como identidad del snippet (igual que el filename de un PDF en /integrarDocumento); /listarDocumentos, /quitarDocumento, /obtenerDocumento y /historialDocumentos lo tratan idéntico. Si ya existe un documento con ese filename en el contexto, lo reemplaza.",
+          summary="Agregar Snippet de Texto")
+def agregar_snippet(contexto: str, body: SnippetRequest):
+    _validate_doc_path_part(contexto, "contexto")
+    _validate_doc_path_part(body.filename, "filename")
+
+    contenido = body.contenido.strip() if body.contenido else ""
+    if not contenido:
+        raise HTTPException(status_code=400, detail="contenido no puede estar vacío.")
+
+    if not funciones.existe_contexto(contexto):
+        raise HTTPException(status_code=404, detail=f"Contexto '{contexto}' no existe.")
+
+    import hashlib
+    current_hash = hashlib.sha256(contenido.encode('utf-8')).hexdigest()
+
+    # Dup detector global por hash de contenido (mismo que /integrarDocumento).
+    # Si exactamente este contenido ya existe en la colección con cualquier
+    # filename, salimos temprano sin duplicar vectores.
+    if herramientas.is_content_duplicate(contexto, current_hash):
+        return {"mensaje": "Este snippet ya había sido integrado previamente."}
+
+    # Si ya existe un doc con ESTE filename en el contexto (pero con otro
+    # contenido — distinto hash), borramos sus chunks primero para que el
+    # filename quede asociado solo al contenido nuevo.
+    docs_actuales = funciones.listar_documentos(contexto)
+    if isinstance(docs_actuales, list) and body.filename in docs_actuales:
+        logger.info(f"[SNIPPET] Reemplazando contenido existente para '{body.filename}' en '{contexto}'.")
+        funciones.borrar_documento(contexto=contexto, filename=body.filename)
+
+    resultado = generacion_aumentada.embed_text(contenido, body.filename, contexto, current_hash)
+    if not resultado.get('success'):
+        detail = resultado.get('message', 'Error al embeber snippet')
+        if 'error_details' in resultado:
+            detail += f" | Detalles: {resultado['error_details']}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    # Persistir el snippet en disco para que /obtenerDocumento y
+    # /historialDocumentos lo vean igual que un PDF. Si falla, log warning
+    # pero no rompe — el embed ya está hecho.
+    try:
+        docs_ctx_dir = Path(DOCS_FOLDER) / contexto
+        docs_ctx_dir.mkdir(parents=True, exist_ok=True)
+        (docs_ctx_dir / body.filename).write_text(contenido, encoding='utf-8')
+    except Exception as persist_err:
+        logger.warning(f"[SNIPPET] No se pudo persistir snippet en disco: {persist_err}")
+
+    return {"mensaje": resultado['message']}
 
 
 @app.get("/obtenerDocumento",
