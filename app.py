@@ -934,6 +934,68 @@ def obtener_documento(contexto: str, filename: str):
     )
 
 
+@app.get("/historialDocumentos",
+         tags=["Documentos"],
+         description="Auditoría: lista TODOS los binarios persistidos en disco bajo DOCS_FOLDER, marcando cada uno como `activo` o `borrado` según si Chroma aún los referencia. También marca `contexto_estado` para distinguir colecciones vivas vs eliminadas. Sin `?contexto` lista todos los contextos. Admin-only. Nota: solo lista archivos que están en disco; docs históricos cargados antes del feature de persistencia no aparecen acá.",
+         summary="Historial de Documentos")
+def historial_documentos(
+    contexto: Optional[str] = None,
+    _: bool = Depends(require_admin),
+):
+    from datetime import datetime, timezone
+
+    if contexto is not None:
+        _validate_doc_path_part(contexto, "contexto")
+
+    base = Path(DOCS_FOLDER)
+    if not base.is_dir():
+        return {"items": [], "total": 0}
+
+    if contexto:
+        ctx_path = base / contexto
+        ctx_dirs = [ctx_path] if ctx_path.is_dir() else []
+    else:
+        ctx_dirs = sorted([d for d in base.iterdir() if d.is_dir()], key=lambda p: p.name)
+
+    items = []
+    for ctx_dir in ctx_dirs:
+        ctx_name = ctx_dir.name
+        ctx_exists = funciones.existe_contexto(ctx_name)
+        ctx_estado = "activo" if ctx_exists else "borrado"
+
+        # Filenames que Chroma aún reconoce como activos en este contexto.
+        # Si el contexto está borrado, este set queda vacío y todos los binarios
+        # caen en `borrado`.
+        activos_set = set()
+        if ctx_exists:
+            try:
+                docs = funciones.listar_documentos(ctx_name)
+                if isinstance(docs, list):
+                    activos_set = set(docs)
+            except Exception as e:
+                logger.warning(f"[HISTORIAL] listar_documentos falló para '{ctx_name}': {e}")
+
+        for f in sorted(ctx_dir.iterdir(), key=lambda p: p.name):
+            if not f.is_file():
+                continue
+            stat = f.stat()
+            estado = "activo" if (ctx_exists and f.name in activos_set) else "borrado"
+            items.append({
+                "contexto": ctx_name,
+                "contexto_estado": ctx_estado,
+                "filename": f.name,
+                "estado": estado,
+                "tamano_bytes": stat.st_size,
+                # `fecha_modificacion` es el mtime del binario en disco — refleja
+                # cuándo se subió/persistió, NO cuándo se borró de Chroma. No hay
+                # tracking de "fecha de borrado" hoy; si se necesita, sería otro
+                # PR (tabla de eventos o columna en chat_logs).
+                "fecha_modificacion": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            })
+
+    return {"items": items, "total": len(items)}
+
+
 @app.delete("/quitarDocumento",
             tags=["Documentos"],
             description="Retira un documento determinado, borrando ese aprendizaje de ese contexto.",
