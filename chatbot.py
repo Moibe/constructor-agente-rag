@@ -1,9 +1,8 @@
-from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from typing import Optional
 from herramientas import obtenContexto
 import funciones
-import herramientas
+import proveedores
 
 # Prompt hardcoded del MIDE — fallback legacy cuando no se proveen instrucciones explícitas.
 _DEFAULT_MIDE_PROMPT = PromptTemplate(
@@ -67,9 +66,12 @@ def _build_prompt(instrucciones: Optional[str]) -> PromptTemplate:
 
 def _extract_tokens(response):
     """Extrae (input_tokens, output_tokens) del response de LangChain.
-    - ChatOpenAI moderno expone `usage_metadata` (input_tokens/output_tokens).
+    `usage_metadata` es el formato unificado de LangChain: ChatOpenAI, ChatOllama,
+    ChatAnthropic y ChatGoogleGenerativeAI lo exponen igual, así que esta función
+    es multi-proveedor sin cambios.
     - Fallback: response_metadata.token_usage (prompt_tokens/completion_tokens).
-    - OllamaLLM devuelve string sin metadatos → (None, None).
+    - Si no hay ninguno de los dos → (None, None), que significa "no se sabe",
+      no "cero".
     """
     if hasattr(response, 'usage_metadata') and response.usage_metadata:
         um = response.usage_metadata
@@ -98,14 +100,14 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
 
     try:
         print("Inicializando modelo de lenguaje: ", modelo_llm)
-        if funciones.existe_modelo(modelo_llm):
-            if herramientas.es_modelo_openai_llm(modelo_llm):
-                from langchain_openai import ChatOpenAI
-                llm = ChatOpenAI(model=modelo_llm)
-            else:
-                llm = OllamaLLM(model=modelo_llm)
-        else:
-            return {"error_message": "No existe ese modelo de lenguaje."}
+        # El factory consulta el registro de modelos para saber el proveedor y
+        # devolver el cliente correcto. Sus errores (modelo no registrado,
+        # desactivado, paquete del proveedor faltante) ya vienen redactados para
+        # que el admin pueda accionar sobre ellos.
+        llm = proveedores.crear_llm(modelo_llm)
+    except proveedores.ProveedorError as e:
+        print(f"Error al inicializar modelo: {e}")
+        return {"error_message": str(e)}
     except Exception as e:
         print(f"Error al inicializar modelo: {e}")
         return {"error_message": f"Error al inicializar modelo: {e}"}
@@ -147,7 +149,8 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
     # Uniformar respuesta a string plano:
     # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
     # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
-    # - OllamaLLM: response es str directo.
+    # - ChatOllama / ChatAnthropic / ChatGoogleGenerativeAI: content es str
+    #   (Anthropic puede devolver lista de bloques, que el helper también aplana).
     raw = response.content if hasattr(response, 'content') else response
     text = _extraer_texto_de_respuesta(raw)
     tokens_input, tokens_output = _extract_tokens(response)

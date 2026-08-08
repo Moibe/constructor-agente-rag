@@ -13,20 +13,11 @@ OPENAI_EMBEDDING_MODELS = [
     "text-embedding-ada-002"
 ]
 
-OPENAI_LLM_MODELS = [
-    "gpt-5.5",
-    "gpt-5.5-pro",
-    "gpt-5",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-4o",
-    "gpt-4o-mini"
-]
-
-
-def es_modelo_openai_llm(nombre_modelo: str) -> bool:
-    """Determina si un modelo LLM es de OpenAI."""
-    return nombre_modelo in OPENAI_LLM_MODELS
+# El routing de proveedor para LLMs ya no vive acá: lo resuelve `proveedores.py`
+# leyendo la columna `proveedor` del registro de modelos (`modelos.py`). La lista
+# `OPENAI_LLM_MODELS` y su helper `es_modelo_openai_llm()` se eliminaron porque
+# eran una de las listas duplicadas que se desincronizaban entre sí.
+# Lo de abajo es sólo para EMBEDDINGS, que siguen su propio camino.
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 TEXT_EMBEDDING_MODEL = os.getenv('TEXT_EMBEDDING_MODEL')

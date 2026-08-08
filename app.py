@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import mimetypes
 import funciones
+import modelos as registro_modelos
 import chatbot as asistente
 import generacion_aumentada
 
@@ -241,7 +242,9 @@ def init_log_db():
         tokens_output INTEGER,
         proyecto_id TEXT,
         proyecto_slug TEXT,
-        asistente_slug TEXT
+        asistente_slug TEXT,
+        proveedor TEXT,
+        costo_usd REAL
     )''')
     # Migración idempotente para deploys con schema previo.
     existing = {row[1] for row in conn.execute("PRAGMA table_info(chat_logs)").fetchall()}
@@ -252,6 +255,15 @@ def init_log_db():
         ('proyecto_id', 'TEXT'),
         ('proyecto_slug', 'TEXT'),
         ('asistente_slug', 'TEXT'),
+        # `costo_usd` se calcula y congela al momento de loguear, con la tarifa
+        # vigente en ese instante. Si mañana un proveedor cambia precios, los
+        # reportes históricos siguen mostrando lo que realmente costó — antes se
+        # multiplicaba al vuelo en /consumo/resumen y un mes del año pasado se
+        # reescribía solo con los precios de hoy.
+        # NULL significa "no se sabe" (modelo sin tarifa o sin tokens reportados),
+        # nunca 0.
+        ('proveedor', 'TEXT'),
+        ('costo_usd', 'REAL'),
     ):
         if col not in existing:
             conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
@@ -471,6 +483,7 @@ migrate_agentes_v2()
 init_proyectos_db()
 init_bases_conocimiento_db()
 init_agentes_db()
+registro_modelos.init_modelos_db()
 cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
@@ -621,6 +634,26 @@ class Proyecto(BaseModel):
 
 class VerificarPasswordRequest(BaseModel):
     password: Optional[str] = None
+
+class ModeloCreate(BaseModel):
+    nombre: str
+    proveedor: str
+    # None = "sin tarifa conocida". Distinto de 0.0, que significa "es gratis"
+    # (el caso de Ollama, que corre en hardware propio).
+    precio_input_usd_1m: Optional[float] = None
+    precio_output_usd_1m: Optional[float] = None
+    activo: bool = True
+    notas: Optional[str] = None
+
+class ModeloUpdate(BaseModel):
+    # `nombre` es la PK y es inmutable: cambiarlo dejaría huérfanos los
+    # chat_logs históricos y los agentes que ya lo referencian. Para renombrar,
+    # crear el nuevo y desactivar el viejo.
+    proveedor: Optional[str] = None
+    precio_input_usd_1m: Optional[float] = None
+    precio_output_usd_1m: Optional[float] = None
+    activo: Optional[bool] = None
+    notas: Optional[str] = None
 
 @app.get("/listarContextos",
          tags=["Contextos"])
@@ -1354,15 +1387,23 @@ def chatbot(data: ChatRequest):
     # Persistir el log con tokens y los slugs denormalizados (para que /registros
     # pueda filtrar por proyecto/asistente sin JOIN). No bloqueamos la respuesta
     # si esto falla.
+    # Costo congelado con la tarifa vigente ahora. Si el modelo no está en el
+    # registro o no tiene tarifa cargada, costo_usd queda NULL y la UI muestra
+    # "sin tarifa" — nunca un número inventado.
+    proveedor_efectivo, costo_usd = registro_modelos.calcular_costo(
+        modelo_efectivo, tokens_input, tokens_output
+    )
+
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
              json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
              text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output,
-             base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"))
+             base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"),
+             proveedor_efectivo, costo_usd)
         )
         conn.commit()
         conn.close()
@@ -1593,29 +1634,12 @@ def registrar_log(data: LogRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al registrar log: {e}")
 
-# Precios OpenAI por 1M tokens (input/output, USD).
-# Valores placeholder según el handoff — VERIFICAR contra pricing oficial al desplegar.
-_OPENAI_PRICING = {
-    'gpt-5':       {'input': 1.25, 'output': 10.00},
-    'gpt-5-mini':  {'input': 0.25, 'output':  2.00},
-    'gpt-5-nano':  {'input': 0.05, 'output':  0.40},
-    'gpt-4o':      {'input': 2.50, 'output': 10.00},
-    'gpt-4o-mini': {'input': 0.15, 'output':  0.60},
-}
-
-
-def _pricing_for(modelo: Optional[str]):
-    """Devuelve el entry de _OPENAI_PRICING que matchea el modelo (longest-prefix).
-    Soporta nombres con sufijo (ej. 'gpt-4o-2024-08-06' → 'gpt-4o', 'gpt-4o-mini' → 'gpt-4o-mini')."""
-    if not modelo:
-        return None
-    m = modelo.lower()
-    # Longest-prefix match para que 'gpt-4o-mini' no caiga en 'gpt-4o'.
-    best = None
-    for key, pricing in _OPENAI_PRICING.items():
-        if m.startswith(key) and (best is None or len(key) > len(best[0])):
-            best = (key, pricing)
-    return best[1] if best else None
+# Las tarifas ya no viven acá. El dict `_OPENAI_PRICING` y su `_pricing_for()`
+# por longest-prefix se eliminaron: el prefix-match no fallaba ruidosamente,
+# mentía ('gpt-5.5'.startswith('gpt-5') → True, así que un modelo de $30/$180
+# por 1M se tarifaba a $1.25/$10). Ahora la fuente de verdad es la tabla
+# `modelos` (ver modelos.py), con match exacto, y el costo se persiste en
+# chat_logs.costo_usd al momento de cada consulta en vez de recalcularse acá.
 
 
 @app.get("/consumo/resumen",
@@ -1623,9 +1647,13 @@ def _pricing_for(modelo: Optional[str]):
          description="Métricas agregadas del periodo (por defecto últimos 30 días). Fuente: logs.db + agentes.db + Chroma. Pensado para el dashboard de Consumo del admin.",
          summary="Resumen de Consumo")
 def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
-    from datetime import date, timedelta
+    from datetime import date, timedelta, datetime, timezone
 
-    today = date.today()
+    # UTC, igual que /registros. Con date.today() local el rango terminaba antes
+    # que el día UTC en curso, así que las consultas de "hoy" hechas después de
+    # las 18:00 hora local (=00:00 UTC del día siguiente) quedaban fuera del
+    # agregado: la pestaña Consumo mostraba $0.00 con consumo real registrado.
+    today = datetime.now(timezone.utc).date()
     try:
         hasta_date = date.fromisoformat(hasta) if hasta else today
         desde_date = date.fromisoformat(desde) if desde else (hasta_date - timedelta(days=30))
@@ -1677,14 +1705,21 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
             (desde_str, upper_exclusive),
         ).fetchall()
 
+        # Sumamos el costo YA PERSISTIDO, no lo recalculamos. `costo_usd` puede
+        # ser NULL (modelo sin tarifa) mientras los tokens no lo son: por eso
+        # `sin_tarifa` cuenta esas filas aparte, para que el total no se lea como
+        # completo cuando en realidad hay consumo sin precio conocido.
         token_rows = conn.execute(
             """SELECT modelo,
+                      proveedor,
                       COALESCE(SUM(tokens_input), 0) AS ti,
-                      COALESCE(SUM(tokens_output), 0) AS toc
+                      COALESCE(SUM(tokens_output), 0) AS toc,
+                      SUM(costo_usd) AS costo,
+                      SUM(CASE WHEN costo_usd IS NULL THEN 1 ELSE 0 END) AS sin_tarifa
                FROM chat_logs
                WHERE fecha >= ? AND fecha < ?
                  AND (tokens_input IS NOT NULL OR tokens_output IS NOT NULL)
-               GROUP BY modelo""",
+               GROUP BY modelo, proveedor""",
             (desde_str, upper_exclusive),
         ).fetchall()
     finally:
@@ -1711,36 +1746,47 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
             "latencia_promedio_ms": int(r["lat"]) if r["lat"] is not None else None,
         })
 
-    # Tokens OpenAI: agregamos por modelo y calculamos costo con tabla local.
+    # Consumo de IA agregado por modelo. El costo sale de la columna persistida,
+    # no de una multiplicación al vuelo.
+    #
+    # NOTA sobre el nombre `tokens_openai`: se conserva porque el front lo lee en
+    # varios lugares, pero ahora agrega TODOS los proveedores (incluido Ollama a
+    # $0.00, que antes se excluía del breakdown por no tener entrada de pricing).
+    # Cada fila de `por_modelo` trae su `proveedor` para que la UI pueda separarlos.
     por_modelo = []
     tokens_input_total = 0
     tokens_output_total = 0
     costo_total = 0.0
+    filas_sin_tarifa_total = 0
     for r in token_rows:
         modelo = r["modelo"] or ""
         ti = int(r["ti"] or 0)
         to = int(r["toc"] or 0)
         if ti == 0 and to == 0:
             continue
-        pricing = _pricing_for(modelo)
-        if pricing is None:
-            # Modelos no-OpenAI (Ollama) o no reconocidos: no van al breakdown ni al total.
-            continue
-        costo = (ti / 1_000_000) * pricing['input'] + (to / 1_000_000) * pricing['output']
+        costo = r["costo"]  # None si TODAS las filas del modelo quedaron sin tarifa
+        sin_tarifa = int(r["sin_tarifa"] or 0)
         por_modelo.append({
             "modelo": modelo,
+            "proveedor": r["proveedor"],
             "input": ti,
             "output": to,
-            "costo_usd_estimado": round(costo, 4),
+            # None = "sin tarifa conocida". La UI debe mostrar "—", no 0.
+            "costo_usd_estimado": round(costo, 6) if costo is not None else None,
+            "consultas_sin_tarifa": sin_tarifa,
         })
         tokens_input_total += ti
         tokens_output_total += to
-        costo_total += costo
+        costo_total += costo or 0.0
+        filas_sin_tarifa_total += sin_tarifa
 
     tokens_openai = {
         "input": tokens_input_total,
         "output": tokens_output_total,
-        "costo_usd_estimado": round(costo_total, 4),
+        "costo_usd_estimado": round(costo_total, 6),
+        # Cuántas consultas del periodo no pudieron tarifarse. Si es > 0, el total
+        # de arriba es un piso, no el gasto completo — la UI debería advertirlo.
+        "consultas_sin_tarifa": filas_sin_tarifa_total,
         "por_modelo": por_modelo,
     }
 
@@ -1844,7 +1890,7 @@ def listar_registros(
         rows = conn.execute(
             f"""SELECT id, fecha, proyecto_id, proyecto_slug, asistente_slug,
                        pregunta, respuesta, ms, tokens_input, tokens_output,
-                       modelo, error
+                       modelo, proveedor, costo_usd, error
                 FROM chat_logs
                 WHERE {where_sql}
                 ORDER BY fecha DESC, id DESC
@@ -1867,6 +1913,11 @@ def listar_registros(
             "tokens_in": r["tokens_input"],
             "tokens_out": r["tokens_output"],
             "modelo": r["modelo"],
+            "proveedor": r["proveedor"],
+            # Leído de la columna, no recalculado: es la tarifa que estaba
+            # vigente cuando ocurrió la consulta. null = sin tarifa conocida,
+            # la UI debe mostrar "—" y no 0.
+            "costo_usd": r["costo_usd"],
             "error": r["error"],
         }
         for r in rows
@@ -1881,9 +1932,201 @@ def listar_registros(
     }
 
 
+def _modelo_to_response(row: dict) -> dict:
+    return {
+        "nombre": row["nombre"],
+        "proveedor": row["proveedor"],
+        "precio_input_usd_1m": row["precio_input_usd_1m"],
+        "precio_output_usd_1m": row["precio_output_usd_1m"],
+        "activo": bool(row["activo"]),
+        "notas": row["notas"],
+        "actualizado_en": row["actualizado_en"],
+    }
+
+def _validate_proveedor(proveedor: str) -> str:
+    p = (proveedor or "").strip().lower()
+    if p not in registro_modelos.PROVEEDORES_VALIDOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"proveedor inválido: '{proveedor}'. Válidos: {', '.join(registro_modelos.PROVEEDORES_VALIDOS)}.",
+        )
+    return p
+
+def _validate_precio(valor: Optional[float], campo: str) -> Optional[float]:
+    if valor is None:
+        return None
+    if not isinstance(valor, (int, float)) or isinstance(valor, bool):
+        raise HTTPException(status_code=400, detail=f"{campo} debe ser numérico o null.")
+    if valor < 0:
+        raise HTTPException(status_code=400, detail=f"{campo} no puede ser negativo.")
+    return float(valor)
+
+def _validate_nombre_modelo(nombre: str) -> str:
+    s = (nombre or "").strip()
+    if not s:
+        raise HTTPException(status_code=400, detail="nombre no puede estar vacío.")
+    if len(s) > 120:
+        raise HTTPException(status_code=400, detail="nombre excede 120 caracteres.")
+    return s
+
+
+@app.get("/modelos",
+         tags=["Modelos"],
+         description="Registro de modelos: nombre, proveedor y tarifas USD por 1M de tokens. Es la fuente de verdad que puebla el dropdown de modelo del asistente (?solo_activos=true) y el tab de Tarifas del admin. Lectura pública porque el host de widgets no tiene token.",
+         summary="Listar Registro de Modelos")
+def listar_registro_modelos(solo_activos: bool = False):
+    return {"modelos": [_modelo_to_response(m) for m in registro_modelos.listar(solo_activos=solo_activos)]}
+
+
+@app.post("/modelos",
+          tags=["Modelos"],
+          status_code=201,
+          description="Registra un modelo nuevo con su proveedor y tarifas. Requiere token admin.",
+          summary="Crear Modelo en el Registro")
+def crear_modelo(body: ModeloCreate, _: bool = Depends(require_admin)):
+    nombre = _validate_nombre_modelo(body.nombre)
+    proveedor = _validate_proveedor(body.proveedor)
+    p_in = _validate_precio(body.precio_input_usd_1m, "precio_input_usd_1m")
+    p_out = _validate_precio(body.precio_output_usd_1m, "precio_output_usd_1m")
+
+    conn = _agentes_connection()
+    try:
+        if conn.execute("SELECT nombre FROM modelos WHERE nombre=?", (nombre,)).fetchone():
+            raise HTTPException(status_code=409, detail=f"Ya existe un modelo con nombre '{nombre}'.")
+        conn.execute(
+            f"INSERT INTO modelos ({registro_modelos.COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (nombre, proveedor, p_in, p_out, 1 if body.activo else 0, body.notas, _now()),
+        )
+        conn.commit()
+        row = conn.execute(
+            f"SELECT {registro_modelos.COLS} FROM modelos WHERE nombre=?", (nombre,)
+        ).fetchone()
+        return _modelo_to_response(dict(row))
+    finally:
+        conn.close()
+
+
+@app.put("/modelos/{nombre:path}",
+         tags=["Modelos"],
+         description="Actualiza proveedor, tarifas, estado o notas de un modelo. El nombre es inmutable (es la clave con la que se tarifaron los logs históricos). Requiere token admin.",
+         summary="Actualizar Modelo del Registro")
+def actualizar_modelo(nombre: str, body: ModeloUpdate, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(
+            f"SELECT {registro_modelos.COLS} FROM modelos WHERE nombre=?", (nombre,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Modelo '{nombre}' no encontrado en el registro.")
+        actual = dict(row)
+
+        proveedor = actual["proveedor"] if body.proveedor is None else _validate_proveedor(body.proveedor)
+        activo = actual["activo"] if body.activo is None else (1 if body.activo else 0)
+        notas = actual["notas"] if body.notas is None else body.notas
+
+        # Los precios usan model_fields_set en vez de `is None` para poder
+        # distinguir "no lo mandé" (preservar) de "mandé null" (borrar la tarifa
+        # y que el modelo pase a contarse como sin tarifa conocida).
+        if 'precio_input_usd_1m' in body.model_fields_set:
+            p_in = _validate_precio(body.precio_input_usd_1m, "precio_input_usd_1m")
+        else:
+            p_in = actual["precio_input_usd_1m"]
+        if 'precio_output_usd_1m' in body.model_fields_set:
+            p_out = _validate_precio(body.precio_output_usd_1m, "precio_output_usd_1m")
+        else:
+            p_out = actual["precio_output_usd_1m"]
+
+        conn.execute(
+            """UPDATE modelos
+               SET proveedor=?, precio_input_usd_1m=?, precio_output_usd_1m=?,
+                   activo=?, notas=?, actualizado_en=?
+               WHERE nombre=?""",
+            (proveedor, p_in, p_out, activo, notas, _now(), nombre),
+        )
+        conn.commit()
+        row = conn.execute(
+            f"SELECT {registro_modelos.COLS} FROM modelos WHERE nombre=?", (nombre,)
+        ).fetchone()
+        return _modelo_to_response(dict(row))
+    finally:
+        conn.close()
+
+
+@app.delete("/modelos/{nombre:path}",
+            tags=["Modelos"],
+            status_code=204,
+            description="Elimina un modelo del registro. Bloquea con 409 si algún agente lo tiene asignado — en ese caso desactívalo (PUT activo=false) en vez de borrarlo. Requiere token admin.",
+            summary="Borrar Modelo del Registro")
+def borrar_modelo_registro(nombre: str, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        if not conn.execute("SELECT nombre FROM modelos WHERE nombre=?", (nombre,)).fetchone():
+            raise HTTPException(status_code=404, detail=f"Modelo '{nombre}' no encontrado en el registro.")
+
+        en_uso = conn.execute(
+            "SELECT COUNT(*) FROM agentes WHERE modelo_llm=?", (nombre,)
+        ).fetchone()[0]
+        if en_uso:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{nombre}' está asignado a {en_uso} agente(s). Desactívalo (PUT /modelos/{nombre} con activo=false) en vez de borrarlo.",
+            )
+
+        conn.execute("DELETE FROM modelos WHERE nombre=?", (nombre,))
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+
+@app.post("/modelos/sincronizar-ollama",
+          tags=["Modelos"],
+          description="Da de alta en el registro los modelos de Ollama instalados que aún no estén registrados, con tarifa 0.00 (hardware propio). No pisa filas existentes: los precios y el estado que hayas editado se respetan. Requiere token admin.",
+          summary="Sincronizar Registro con Ollama")
+async def sincronizar_modelos_ollama(_: bool = Depends(require_admin)):
+    OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+            response.raise_for_status()
+            instalados = [m['name'] for m in response.json().get('models', [])]
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar a Ollama: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al consultar Ollama: {e}")
+
+    # Ollama no distingue LLMs de modelos de embedding en /api/tags, así que
+    # filtramos por nombre. Es una heurística, no una garantía: si un LLM se
+    # llamara "embed-algo" quedaría fuera, y por eso los omitidos se devuelven
+    # explícitamente en la respuesta en vez de descartarse en silencio.
+    omitidos = [n for n in instalados if 'embed' in n.lower()]
+    candidatos = [n for n in instalados if n not in omitidos]
+
+    conn = _agentes_connection()
+    try:
+        existentes = {r[0] for r in conn.execute("SELECT nombre FROM modelos").fetchall()}
+        nuevos = [n for n in candidatos if n not in existentes]
+        now = _now()
+        for nombre in nuevos:
+            conn.execute(
+                f"INSERT INTO modelos ({registro_modelos.COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (nombre, 'ollama', 0.0, 0.0, 1, f'Alta automática desde Ollama ({now[:10]})', now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {
+        "instalados_en_ollama": instalados,
+        "agregados": nuevos,
+        "ya_registrados": [n for n in candidatos if n in existentes],
+        "omitidos_por_ser_embedding": omitidos,
+    }
+
+
 @app.get("/listarModelos",
          tags=["Modelos"],
-         description="Consulta Ollama y retorna la lista de modelos descargados localmente.",
+         description="Consulta Ollama y retorna la lista de modelos descargados localmente. Es la vista de 'qué hay instalado en la máquina', distinta de GET /modelos (el registro con proveedores y tarifas).",
          summary="Listar Modelos")
 async def listar_modelos():
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')

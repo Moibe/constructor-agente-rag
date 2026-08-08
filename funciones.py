@@ -4,7 +4,6 @@ from typing import Dict
 from pathlib import Path
 import operaciones_chroma
 from typing import Dict, List
-import globales
 import herramientas
 
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
@@ -252,9 +251,13 @@ def existe_contexto(contexto: str):
     else:
         return False 
     
-def existe_modelo(modelo: str): 
+def existe_modelo(modelo: str):
+    """Consulta el registro de modelos (tabla `modelos` en agentes.db).
 
-    if modelo in globales.modelos:
-        return True
-    else:
-        return False 
+    Antes leía la whitelist hardcodeada `globales.modelos`, que era una de las
+    cinco listas de modelos que no coincidían entre sí. Un modelo desactivado en
+    el registro cuenta como inexistente: es la forma de sacar un modelo de
+    circulación sin borrar su tarifa ni el histórico de costos que la usó.
+    """
+    import modelos as registro_modelos
+    return registro_modelos.existe(modelo, solo_activos=True)

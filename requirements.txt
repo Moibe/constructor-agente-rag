@@ -19,6 +19,13 @@ langchain-ollama
 langchain-openai
 langchain-chroma
 
+# Proveedores adicionales del registro de modelos (ver modelos.py / proveedores.py).
+# proveedores.py los importa de forma diferida, así que si alguno falta el error
+# dice qué instalar en vez de tumbar el arranque — pero vienen en el requirements
+# para que activar Claude o Gemini sea sólo cargar la API key y prender el modelo.
+langchain-anthropic
+langchain-google-genai
+
 transformers
 torch
 sentencepiece
