@@ -11,8 +11,8 @@ con el precio de otro.
 Vive en `agentes.db` (junto a agentes/proyectos), no en `logs.db`: es
 configuración, no telemetría.
 
-Este módulo NO importa `app.py` — al revés. `app.py`, `chatbot.py`, `funciones.py`
-y `proveedores.py` lo consultan.
+Este módulo NO importa `app.py` — al revés. `app.py` y `proveedores.py` lo
+consultan.
 """
 
 import os

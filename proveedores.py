@@ -9,6 +9,7 @@ cuando alguien realmente usa ese proveedor, y si falta se levanta un error que
 dice qué instalar en vez de un ImportError críptico al arrancar el server.
 """
 
+import os
 from typing import Optional
 
 import modelos
@@ -24,6 +25,19 @@ def _paquete_faltante(proveedor: str, paquete: str, err: Exception) -> Proveedor
         f"El proveedor '{proveedor}' requiere el paquete '{paquete}', que no está "
         f"instalado. Instálalo con: pip install {paquete}  (detalle: {err})"
     )
+
+
+# Verificado experimentalmente (2026-08-08): ChatOpenAI y ChatGoogleGenerativeAI
+# validan la API key al construirse (truenan antes de llegar aquí, y el except
+# genérico de crear_llm() los envuelve bien). ChatAnthropic NO — se construye sin
+# error incluso sin key, y sólo fallaría después, al invocar, con un error crudo
+# que no pasa por crear_llm(). Por eso Anthropic necesita este chequeo explícito.
+def _requerir_env(proveedor: str, env_var: str):
+    if not os.getenv(env_var):
+        raise ProveedorError(
+            f"El proveedor '{proveedor}' requiere la variable de entorno "
+            f"'{env_var}', que no está configurada en el .env del backend."
+        )
 
 
 def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
@@ -50,10 +64,11 @@ def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
     except ProveedorError:
         raise
     except Exception as e:
-        # Típicamente la API key faltante. El cliente de LangChain la valida al
-        # construirse y su error no menciona ni el modelo ni el proveedor, así
-        # que lo envolvemos con ese contexto para que el mensaje que llega al
-        # admin diga qué configurar.
+        # Típicamente la API key faltante (OpenAI y Google la validan al
+        # construirse; Anthropic la valida arriba en _construir() vía
+        # _requerir_env). El error de LangChain no menciona ni el modelo ni el
+        # proveedor, así que lo envolvemos con ese contexto para que el mensaje
+        # que llega al admin diga qué configurar.
         raise ProveedorError(
             f"No se pudo inicializar el modelo '{nombre_modelo}' (proveedor "
             f"'{proveedor}'). Revisa que la API key del proveedor esté "
@@ -86,6 +101,7 @@ def _construir(proveedor: str, nombre_modelo: str):
             from langchain_anthropic import ChatAnthropic
         except ImportError as e:
             raise _paquete_faltante(proveedor, 'langchain-anthropic', e)
+        _requerir_env(proveedor, 'ANTHROPIC_API_KEY')
         # max_tokens es obligatorio en la API de Anthropic; LangChain tiene un
         # default bajo, así que lo subimos a algo razonable para respuestas de chat.
         return ChatAnthropic(model=nombre_modelo, max_tokens=4096)

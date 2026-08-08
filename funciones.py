@@ -242,22 +242,11 @@ def borrar_documento(contexto: str, filename: str) -> int:
         traceback.print_exc()
         return 0
     
-def existe_contexto(contexto: str): 
+def existe_contexto(contexto: str):
 
     resultados = listar_contextos()
 
     if contexto in resultados:
         return True
     else:
-        return False 
-    
-def existe_modelo(modelo: str):
-    """Consulta el registro de modelos (tabla `modelos` en agentes.db).
-
-    Antes leía la whitelist hardcodeada `globales.modelos`, que era una de las
-    cinco listas de modelos que no coincidían entre sí. Un modelo desactivado en
-    el registro cuenta como inexistente: es la forma de sacar un modelo de
-    circulación sin borrar su tarifa ni el histórico de costos que la usó.
-    """
-    import modelos as registro_modelos
-    return registro_modelos.existe(modelo, solo_activos=True)
+        return False
