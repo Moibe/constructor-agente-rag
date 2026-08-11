@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 import mimetypes
 import funciones
 import modelos as registro_modelos
+import usuarios as registro_usuarios
 import chatbot as asistente
 import generacion_aumentada
 
@@ -264,6 +265,14 @@ def init_log_db():
         # nunca 0.
         ('proveedor', 'TEXT'),
         ('costo_usd', 'REAL'),
+        # Usuario final identificado (no autenticado) vía `?usuario=<slug>` en el
+        # widget. Denormalizado igual que proyecto_slug/asistente_slug: si el
+        # usuario se renombra o se borra del registro después, el log histórico
+        # sigue mostrando cómo se llamaba en el momento de la consulta.
+        # NULL = anónimo (no venía identificado, o el slug no matcheó ninguno).
+        ('usuario_id', 'TEXT'),
+        ('usuario_slug', 'TEXT'),
+        ('usuario_nombre', 'TEXT'),
     ):
         if col not in existing:
             conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
@@ -273,6 +282,7 @@ def init_log_db():
     conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_agente_id ON chat_logs(agente_id)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_proyecto_slug ON chat_logs(proyecto_slug)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_asistente_slug ON chat_logs(asistente_slug)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_logs_usuario_slug ON chat_logs(usuario_slug)')
     conn.commit()
     conn.close()
 
@@ -484,6 +494,7 @@ init_proyectos_db()
 init_bases_conocimiento_db()
 init_agentes_db()
 registro_modelos.init_modelos_db()
+registro_usuarios.init_usuarios_db()
 cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
@@ -528,6 +539,11 @@ class ChatRequest(BaseModel):
     instrucciones: Optional[str] = None
     historial_max: Optional[int] = None
     top_k: Optional[int] = None
+    # Slug del usuario final identificado (no autenticado) por el widget vía
+    # `?usuario=<slug>` + localStorage. Si no matchea ningún usuario del
+    # proyecto del agente, la consulta se loguea como anónima — nunca se
+    # rechaza el chat por esto.
+    usuario_slug: Optional[str] = None
 
 class SnippetRequest(BaseModel):
     filename: str
@@ -652,6 +668,21 @@ class ModeloUpdate(BaseModel):
     proveedor: Optional[str] = None
     precio_input_usd_1m: Optional[float] = None
     precio_output_usd_1m: Optional[float] = None
+    activo: Optional[bool] = None
+    notas: Optional[str] = None
+
+class UsuarioCreate(BaseModel):
+    proyecto_id: str
+    slug: str
+    nombre: str
+    activo: bool = True
+    notas: Optional[str] = None
+
+class UsuarioUpdate(BaseModel):
+    # `slug` es inmutable una vez creado: es lo que viaja en la URL que ya
+    # mandaste al usuario final y lo que quedó denormalizado en chat_logs
+    # históricos. Para renombrar el slug, crear uno nuevo y desactivar este.
+    nombre: Optional[str] = None
     activo: Optional[bool] = None
     notas: Optional[str] = None
 
@@ -1394,16 +1425,26 @@ def chatbot(data: ChatRequest):
         modelo_efectivo, tokens_input, tokens_output
     )
 
+    # Usuario final identificado (no autenticado) por el widget. Se resuelve
+    # contra el proyecto del agente — un slug de otro proyecto, mal escrito, o
+    # de un usuario borrado/desactivado, simplemente no matchea y la consulta
+    # se loguea anónima (usuario_id NULL). Nunca se rechaza el chat por esto.
+    usuario_fila = registro_usuarios.resolver(base.get("proyecto_id"), data.usuario_slug)
+    usuario_id_efectivo = usuario_fila["id"] if usuario_fila else None
+    usuario_slug_efectivo = usuario_fila["slug"] if usuario_fila else None
+    usuario_nombre_efectivo = usuario_fila["nombre"] if usuario_fila else None
+
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
              json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
              text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output,
              base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"),
-             proveedor_efectivo, costo_usd)
+             proveedor_efectivo, costo_usd,
+             usuario_id_efectivo, usuario_slug_efectivo, usuario_nombre_efectivo)
         )
         conn.commit()
         conn.close()
@@ -1646,7 +1687,7 @@ def registrar_log(data: LogRequest):
          tags=["Consumo"],
          description="Métricas agregadas del periodo (por defecto últimos 30 días). Fuente: logs.db + agentes.db + Chroma. Pensado para el dashboard de Consumo del admin.",
          summary="Resumen de Consumo")
-def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
+def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, usuario: Optional[str] = None):
     from datetime import date, timedelta, datetime, timezone
 
     # UTC, igual que /registros. Con date.today() local el rango terminaba antes
@@ -1666,43 +1707,48 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
     # gracias al orden lexicográfico.
     upper_exclusive = (hasta_date + timedelta(days=1)).isoformat()
 
+    # Filtro opcional por usuario final (slug). Se anexa al final del WHERE de
+    # cada query de abajo — el orden de los AND no importa para el resultado.
+    usuario_sql = " AND usuario_slug = ?" if usuario else ""
+    usuario_params = [usuario] if usuario else []
+
     conn = sqlite3.connect(LOG_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         total_row = conn.execute(
-            "SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?",
-            (desde_str, upper_exclusive),
+            f"SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?{usuario_sql}",
+            (desde_str, upper_exclusive, *usuario_params),
         ).fetchone()
         llamadas_total = total_row["c"]
 
         errores_row = conn.execute(
-            "SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? AND error IS NOT NULL AND error != ''",
-            (desde_str, upper_exclusive),
+            f"SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? AND error IS NOT NULL AND error != ''{usuario_sql}",
+            (desde_str, upper_exclusive, *usuario_params),
         ).fetchone()
         errores_total = errores_row["c"]
 
         lat_row = conn.execute(
-            "SELECT AVG(ms) AS a FROM chat_logs WHERE fecha >= ? AND fecha < ? AND (error IS NULL OR error = '') AND ms IS NOT NULL",
-            (desde_str, upper_exclusive),
+            f"SELECT AVG(ms) AS a FROM chat_logs WHERE fecha >= ? AND fecha < ? AND (error IS NULL OR error = '') AND ms IS NOT NULL{usuario_sql}",
+            (desde_str, upper_exclusive, *usuario_params),
         ).fetchone()
         latencia_promedio_ms = int(lat_row["a"]) if lat_row["a"] is not None else None
 
         dia_rows = conn.execute(
-            "SELECT substr(fecha, 1, 10) AS dia, COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? GROUP BY dia ORDER BY dia ASC",
-            (desde_str, upper_exclusive),
+            f"SELECT substr(fecha, 1, 10) AS dia, COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?{usuario_sql} GROUP BY dia ORDER BY dia ASC",
+            (desde_str, upper_exclusive, *usuario_params),
         ).fetchall()
         llamadas_por_dia = [{"fecha": r["dia"], "count": r["c"]} for r in dia_rows]
 
         agente_rows = conn.execute(
-            """SELECT agente_id,
+            f"""SELECT agente_id,
                       COUNT(*) AS total,
                       SUM(CASE WHEN error IS NOT NULL AND error != '' THEN 1 ELSE 0 END) AS errores,
                       AVG(CASE WHEN (error IS NULL OR error = '') THEN ms END) AS lat
                FROM chat_logs
-               WHERE fecha >= ? AND fecha < ?
+               WHERE fecha >= ? AND fecha < ?{usuario_sql}
                GROUP BY agente_id
                ORDER BY total DESC""",
-            (desde_str, upper_exclusive),
+            (desde_str, upper_exclusive, *usuario_params),
         ).fetchall()
 
         # Sumamos el costo YA PERSISTIDO, no lo recalculamos. `costo_usd` puede
@@ -1710,7 +1756,7 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
         # `sin_tarifa` cuenta esas filas aparte, para que el total no se lea como
         # completo cuando en realidad hay consumo sin precio conocido.
         token_rows = conn.execute(
-            """SELECT modelo,
+            f"""SELECT modelo,
                       proveedor,
                       COALESCE(SUM(tokens_input), 0) AS ti,
                       COALESCE(SUM(tokens_output), 0) AS toc,
@@ -1718,9 +1764,9 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None):
                       SUM(CASE WHEN costo_usd IS NULL THEN 1 ELSE 0 END) AS sin_tarifa
                FROM chat_logs
                WHERE fecha >= ? AND fecha < ?
-                 AND (tokens_input IS NOT NULL OR tokens_output IS NOT NULL)
+                 AND (tokens_input IS NOT NULL OR tokens_output IS NOT NULL){usuario_sql}
                GROUP BY modelo, proveedor""",
-            (desde_str, upper_exclusive),
+            (desde_str, upper_exclusive, *usuario_params),
         ).fetchall()
     finally:
         conn.close()
@@ -1835,6 +1881,7 @@ def listar_registros(
     hasta: Optional[str] = None,
     proyecto: Optional[str] = None,
     asistente: Optional[str] = None,
+    usuario: Optional[str] = None,
     solo_errores: bool = False,
     limit: int = 50,
     offset: int = 0,
@@ -1874,6 +1921,9 @@ def listar_registros(
     if asistente:
         where_clauses.append("asistente_slug = ?")
         where_params.append(asistente)
+    if usuario:
+        where_clauses.append("usuario_slug = ?")
+        where_params.append(usuario)
     if solo_errores:
         where_clauses.append("error IS NOT NULL AND error != ''")
 
@@ -1890,7 +1940,7 @@ def listar_registros(
         rows = conn.execute(
             f"""SELECT id, fecha, proyecto_id, proyecto_slug, asistente_slug,
                        pregunta, respuesta, ms, tokens_input, tokens_output,
-                       modelo, proveedor, costo_usd, error
+                       modelo, proveedor, costo_usd, usuario_slug, usuario_nombre, error
                 FROM chat_logs
                 WHERE {where_sql}
                 ORDER BY fecha DESC, id DESC
@@ -1918,6 +1968,11 @@ def listar_registros(
             # vigente cuando ocurrió la consulta. null = sin tarifa conocida,
             # la UI debe mostrar "—" y no 0.
             "costo_usd": r["costo_usd"],
+            # Denormalizado al momento de la consulta (ver /chatbot). null =
+            # anónimo: no venía identificado o el slug no matcheó ningún
+            # usuario del proyecto.
+            "usuario_slug": r["usuario_slug"],
+            "usuario_nombre": r["usuario_nombre"],
             "error": r["error"],
         }
         for r in rows
@@ -2122,6 +2177,100 @@ async def sincronizar_modelos_ollama(_: bool = Depends(require_admin)):
         "ya_registrados": [n for n in candidatos if n in existentes],
         "omitidos_por_ser_embedding": omitidos,
     }
+
+
+def _usuario_to_response(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "proyecto_id": row["proyecto_id"],
+        "slug": row["slug"],
+        "nombre": row["nombre"],
+        "activo": bool(row["activo"]),
+        "notas": row["notas"],
+        "creado_en": row["creado_en"],
+        "actualizado_en": row["actualizado_en"],
+    }
+
+
+@app.get("/usuarios",
+         tags=["Usuarios"],
+         description="Registro de usuarios finales identificados (no autenticados) por proyecto — ej. 'Cristian QA', 'Bryan PO'. Es la fuente de verdad que resuelve el `?usuario=<slug>` del widget y puebla el tab Usuarios del admin. Lectura pública porque el host de widgets no tiene token.",
+         summary="Listar Usuarios")
+def listar_registro_usuarios(proyecto_id: Optional[str] = None, solo_activos: bool = False):
+    return {"usuarios": [_usuario_to_response(u) for u in registro_usuarios.listar(proyecto_id=proyecto_id, solo_activos=solo_activos)]}
+
+
+@app.post("/usuarios",
+          tags=["Usuarios"],
+          status_code=201,
+          description="Registra un usuario final nuevo dentro de un proyecto. El slug es único por proyecto (no globalmente) y es lo que va en la URL `?usuario=<slug>` del widget. Requiere token admin.",
+          summary="Crear Usuario")
+def crear_usuario(body: UsuarioCreate, _: bool = Depends(require_admin)):
+    _validate_proyecto_existe(body.proyecto_id)
+    slug = _validate_slug(body.slug)
+    nombre = _validate_nombre(body.nombre)
+
+    conn = _agentes_connection()
+    try:
+        if conn.execute(
+            "SELECT id FROM usuarios WHERE proyecto_id=? AND slug=?", (body.proyecto_id, slug)
+        ).fetchone():
+            raise HTTPException(status_code=409, detail=f"Ya existe un usuario con slug '{slug}' en este proyecto.")
+        uid = uuid.uuid4().hex
+        now = _now()
+        conn.execute(
+            f"INSERT INTO usuarios ({registro_usuarios.COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, body.proyecto_id, slug, nombre, 1 if body.activo else 0, body.notas, now, now),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (uid,)).fetchone()
+        return _usuario_to_response(dict(row))
+    finally:
+        conn.close()
+
+
+@app.put("/usuarios/{usuario_id}",
+         tags=["Usuarios"],
+         description="Actualiza nombre, estado o notas de un usuario. El proyecto y el slug son inmutables (el slug ya viaja en URLs entregadas y en chat_logs históricos); para renombrar el slug, crear uno nuevo y desactivar este. Requiere token admin.",
+         summary="Actualizar Usuario")
+def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Usuario '{usuario_id}' no encontrado.")
+        actual = dict(row)
+
+        nombre = actual["nombre"] if body.nombre is None else _validate_nombre(body.nombre)
+        activo = actual["activo"] if body.activo is None else (1 if body.activo else 0)
+        notas = actual["notas"] if body.notas is None else body.notas
+
+        conn.execute(
+            "UPDATE usuarios SET nombre=?, activo=?, notas=?, actualizado_en=? WHERE id=?",
+            (nombre, activo, notas, _now(), usuario_id),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
+        return _usuario_to_response(dict(row))
+    finally:
+        conn.close()
+
+
+@app.delete("/usuarios/{usuario_id}",
+            tags=["Usuarios"],
+            status_code=204,
+            description="Elimina un usuario del registro. A diferencia de /modelos, esto NUNCA se bloquea por uso: el nombre ya quedó denormalizado en cada chat_log al momento de la consulta, así que borrar el usuario no corrompe el histórico. Requiere token admin.",
+            summary="Borrar Usuario")
+def borrar_usuario(usuario_id: str, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        if not conn.execute("SELECT id FROM usuarios WHERE id=?", (usuario_id,)).fetchone():
+            raise HTTPException(status_code=404, detail=f"Usuario '{usuario_id}' no encontrado.")
+        conn.execute("DELETE FROM usuarios WHERE id=?", (usuario_id,))
+        conn.commit()
+        return None
+    finally:
+        conn.close()
 
 
 @app.get("/listarModelos",
