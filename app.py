@@ -1883,6 +1883,8 @@ def listar_registros(
     asistente: Optional[str] = None,
     usuario: Optional[str] = None,
     solo_errores: bool = False,
+    orden_por: Optional[str] = None,
+    orden_dir: str = 'desc',
     limit: int = 50,
     offset: int = 0,
     _: bool = Depends(require_admin),
@@ -1893,6 +1895,31 @@ def listar_registros(
         raise HTTPException(status_code=400, detail="limit debe estar entre 1 y 200.")
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset debe ser >= 0.")
+
+    # Whitelist de columnas ordenables: el nombre de columna no se puede
+    # parametrizar con `?` en SQL, así que se valida contra este mapa fijo en
+    # vez de interpolar lo que mande el cliente (evita SQL injection vía
+    # nombre de columna). `tokens` no es una columna real: se ordena por la
+    # suma de input+output, que es lo que la UI muestra.
+    ORDEN_COLUMNAS = {
+        'timestamp': 'fecha',
+        'proyecto': 'proyecto_slug',
+        'asistente': 'asistente_slug',
+        'usuario': 'usuario_nombre',
+        'pregunta': 'pregunta',
+        'latencia': 'ms',
+        'tokens': '(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0))',
+    }
+    if orden_dir not in ('asc', 'desc'):
+        raise HTTPException(status_code=400, detail="orden_dir debe ser 'asc' o 'desc'.")
+    if orden_por is not None and orden_por not in ORDEN_COLUMNAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"orden_por inválido: '{orden_por}'. Válidos: {', '.join(ORDEN_COLUMNAS)}.",
+        )
+    # Default: más reciente primero, igual que antes de que existiera este parámetro.
+    columna_orden = ORDEN_COLUMNAS.get(orden_por, 'fecha')
+    orden_sql = f"{columna_orden} {orden_dir.upper()}, id DESC"
 
     # UTC, no local: los timestamps en chat_logs son UTC, así que el rango
     # default ("últimos 7 días") tiene que estar en la misma zona para no
@@ -1943,7 +1970,7 @@ def listar_registros(
                        modelo, proveedor, costo_usd, usuario_slug, usuario_nombre, error
                 FROM chat_logs
                 WHERE {where_sql}
-                ORDER BY fecha DESC, id DESC
+                ORDER BY {orden_sql}
                 LIMIT ? OFFSET ?""",
             where_params + [limit, offset],
         ).fetchall()
