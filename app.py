@@ -1888,7 +1888,7 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
 
 @app.get("/registros",
          tags=["Consumo"],
-         description="Auditoría detallada de interacciones con /chatbot. Filtros opcionales por rango de fechas, proyecto, asistente, errores. Paginación con limit (max 200) y offset. Requiere token admin.",
+         description="Auditoría detallada de interacciones con /chatbot. Filtros opcionales por rango de fechas, proyecto, asistente, usuario, errores, texto de la pregunta, y mínimos de latencia (rag/llm/total) y tokens. Ordenable con orden_por/orden_dir. Paginación con limit (max 200) y offset. Requiere token admin.",
          summary="Listar Registros")
 def listar_registros(
     desde: Optional[str] = None,
@@ -1897,6 +1897,11 @@ def listar_registros(
     asistente: Optional[str] = None,
     usuario: Optional[str] = None,
     solo_errores: bool = False,
+    pregunta_contiene: Optional[str] = None,
+    latencia_rag_min: Optional[int] = None,
+    latencia_llm_min: Optional[int] = None,
+    latencia_min: Optional[int] = None,
+    tokens_min: Optional[int] = None,
     orden_por: Optional[str] = None,
     orden_dir: str = 'desc',
     limit: int = 50,
@@ -1969,6 +1974,21 @@ def listar_registros(
         where_params.append(usuario)
     if solo_errores:
         where_clauses.append("error IS NOT NULL AND error != ''")
+    if pregunta_contiene:
+        where_clauses.append("pregunta LIKE ?")
+        where_params.append(f"%{pregunta_contiene}%")
+    if latencia_rag_min is not None:
+        where_clauses.append("ms_rag >= ?")
+        where_params.append(latencia_rag_min)
+    if latencia_llm_min is not None:
+        where_clauses.append("ms_llm >= ?")
+        where_params.append(latencia_llm_min)
+    if latencia_min is not None:
+        where_clauses.append("ms >= ?")
+        where_params.append(latencia_min)
+    if tokens_min is not None:
+        where_clauses.append("(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0)) >= ?")
+        where_params.append(tokens_min)
 
     where_sql = " AND ".join(where_clauses)
 

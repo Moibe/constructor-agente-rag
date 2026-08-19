@@ -40,8 +40,25 @@ def _requerir_env(proveedor: str, env_var: str):
         )
 
 
+# Caché de clientes ya construidos, keyed por (proveedor, nombre_modelo).
+# Medido experimentalmente (2026-08-19): construir un ChatOllama/ChatOpenAI/etc.
+# cuesta ~300-350ms SIEMPRE, en cada llamada — no es un costo de arranque en
+# frío que se diluye, es el validador de Pydantic de esas clases corriendo cada
+# vez (sin red de por medio). El cliente en sí es stateless y reutilizable
+# entre consultas del mismo modelo, así que cachearlo ahorra ese costo en cada
+# /chatbot excepto el primero.
+#
+# La validación de existencia/activo en el registro (abajo) NUNCA se cachea —
+# corre siempre desde SQLite (~0.5ms, no vale la pena cachearla) — para que
+# desactivar un modelo desde el admin tenga efecto inmediato en la siguiente
+# consulta sin importar qué haya en este caché. Si `proveedor` cambia para un
+# `nombre_modelo` existente, la cache key cambia con él, así que nunca se
+# devuelve un cliente construido para el proveedor viejo.
+_llm_cache: dict = {}
+
+
 def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
-    """Devuelve el cliente LangChain que corresponde al modelo.
+    """Devuelve el cliente LangChain que corresponde al modelo (cacheado).
 
     Levanta ProveedorError si el modelo no está en el registro, está desactivado,
     el proveedor es desconocido, o falta el paquete del proveedor.
@@ -59,8 +76,15 @@ def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
         )
 
     proveedor = fila['proveedor']
+    cache_key = (proveedor, nombre_modelo)
+    cliente_cacheado = _llm_cache.get(cache_key)
+    if cliente_cacheado is not None:
+        return cliente_cacheado
+
     try:
-        return _construir(proveedor, nombre_modelo)
+        cliente = _construir(proveedor, nombre_modelo)
+        _llm_cache[cache_key] = cliente
+        return cliente
     except ProveedorError:
         raise
     except Exception as e:
