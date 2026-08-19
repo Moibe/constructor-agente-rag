@@ -1,3 +1,4 @@
+import time
 from langchain_core.prompts import PromptTemplate
 from typing import Optional
 from herramientas import obtenContexto
@@ -85,8 +86,14 @@ def _extract_tokens(response):
 
 def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None, top_k: int = 1):
     """Devuelve dict:
-    - éxito: {"text": str, "tokens_input": int|None, "tokens_output": int|None}
+    - éxito: {"text": str, "tokens_input": int|None, "tokens_output": int|None,
+              "ms_rag": int|None, "ms_llm": int|None}
     - error: {"error_message": str}
+
+    `ms_rag`/`ms_llm` desglosan la latencia total (que ya mide app.py alrededor
+    de esta función completa) en sus dos partes caras: la búsqueda en Chroma y
+    la llamada al LLM. `ms_rag` es None cuando el agente no tiene BC asignada
+    (no hubo RAG que medir) — nunca 0, para no leerse como "instantáneo".
 
     `top_k`: cuántos chunks recuperar de Chroma y pasar al LLM. Default 1
     (comportamiento histórico para FAQs autocontenidos). Para PDFs informativos
@@ -112,6 +119,7 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
         print(f"Error al inicializar modelo: {e}")
         return {"error_message": f"Error al inicializar modelo: {e}"}
 
+    ms_rag = None
     if sin_rag:
         # Sin BC: respondemos sin retrieval. Le decimos al modelo explícitamente que
         # no hay base de conocimiento para que no alucine que sí la tiene.
@@ -121,9 +129,14 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
         # cambio no se pasaba explícito → langchain usaba su default (k=4) pero
         # acá solo se usaba retrieved_docs[0], desperdiciando 3 búsquedas. Ahora
         # pedimos exactamente `top_k` y concatenamos todo lo que vuelva.
+        # El cronómetro arranca incluyendo obtenContexto() (abre/conecta la
+        # colección de Chroma) porque para quien lee el reporte, eso también
+        # es "tiempo del RAG", no un paso aparte.
+        rag_start = time.perf_counter()
         vector_db = obtenContexto(contexto)
         retriever = vector_db.as_retriever(search_kwargs={"k": max(1, top_k)})
         retrieved_docs = retriever.invoke(user_question)
+        ms_rag = int((time.perf_counter() - rag_start) * 1000)
         if retrieved_docs:
             # Separador explícito entre chunks para que el LLM los pueda distinguir
             # cuando hay varios (importante para PDFs informativos con respuestas
@@ -144,7 +157,9 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
     })
 
     # Genera la respuesta
+    llm_start = time.perf_counter()
     response = llm.invoke(full_prompt)
+    ms_llm = int((time.perf_counter() - llm_start) * 1000)
 
     # Uniformar respuesta a string plano:
     # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
@@ -154,4 +169,10 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
     raw = response.content if hasattr(response, 'content') else response
     text = _extraer_texto_de_respuesta(raw)
     tokens_input, tokens_output = _extract_tokens(response)
-    return {"text": text, "tokens_input": tokens_input, "tokens_output": tokens_output}
+    return {
+        "text": text,
+        "tokens_input": tokens_input,
+        "tokens_output": tokens_output,
+        "ms_rag": ms_rag,
+        "ms_llm": ms_llm,
+    }

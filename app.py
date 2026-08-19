@@ -273,6 +273,12 @@ def init_log_db():
         ('usuario_id', 'TEXT'),
         ('usuario_slug', 'TEXT'),
         ('usuario_nombre', 'TEXT'),
+        # Desglose de `ms` (latencia total): cuánto de ese total fue búsqueda
+        # en Chroma vs. la llamada al LLM. NULL, no 0 — ms_rag no aplica si el
+        # agente no tiene BC, y ambos quedan NULL si truena antes de invocar
+        # el LLM (ver chatbot.chat()).
+        ('ms_rag', 'INTEGER'),
+        ('ms_llm', 'INTEGER'),
     ):
         if col not in existing:
             conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
@@ -1389,6 +1395,11 @@ def chatbot(data: ChatRequest):
     tokens_input = None
     tokens_output = None
     error_str = None
+    # Desglose de la latencia total. None = "no aplica/no llegó a esa etapa"
+    # (ej. ms_rag en un agente sin BC, o ambos si truena antes de invocar el
+    # LLM) — nunca 0, para no leerse como "instantáneo".
+    ms_rag = None
+    ms_llm = None
     try:
         result = asistente.chat(
             data.pregunta,
@@ -1406,6 +1417,8 @@ def chatbot(data: ChatRequest):
                 text = result.get("text", "") or ""
                 tokens_input = result.get("tokens_input")
                 tokens_output = result.get("tokens_output")
+                ms_rag = result.get("ms_rag")
+                ms_llm = result.get("ms_llm")
         else:
             # Compat: si algún path devolviera string puro, tratarlo como texto.
             text = str(result)
@@ -1437,14 +1450,15 @@ def chatbot(data: ChatRequest):
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre, ms_rag, ms_llm)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
              json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
              text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output,
              base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"),
              proveedor_efectivo, costo_usd,
-             usuario_id_efectivo, usuario_slug_efectivo, usuario_nombre_efectivo)
+             usuario_id_efectivo, usuario_slug_efectivo, usuario_nombre_efectivo,
+             ms_rag, ms_llm)
         )
         conn.commit()
         conn.close()
@@ -1908,6 +1922,8 @@ def listar_registros(
         'usuario': 'usuario_nombre',
         'pregunta': 'pregunta',
         'latencia': 'ms',
+        'latencia_rag': 'ms_rag',
+        'latencia_llm': 'ms_llm',
         'tokens': '(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0))',
     }
     if orden_dir not in ('asc', 'desc'):
@@ -1966,7 +1982,7 @@ def listar_registros(
 
         rows = conn.execute(
             f"""SELECT id, fecha, proyecto_id, proyecto_slug, asistente_slug,
-                       pregunta, respuesta, ms, tokens_input, tokens_output,
+                       pregunta, respuesta, ms, ms_rag, ms_llm, tokens_input, tokens_output,
                        modelo, proveedor, costo_usd, usuario_slug, usuario_nombre, error
                 FROM chat_logs
                 WHERE {where_sql}
@@ -1987,6 +2003,11 @@ def listar_registros(
             "pregunta": r["pregunta"],
             "respuesta": r["respuesta"],
             "latencia_ms": r["ms"],
+            # Desglose de latencia_ms. null = no aplica (ms_rag en un agente
+            # sin BC) o no se alcanzó esa etapa (truena antes del LLM) —
+            # nunca 0, la UI debe mostrar "—".
+            "latencia_rag_ms": r["ms_rag"],
+            "latencia_llm_ms": r["ms_llm"],
             "tokens_in": r["tokens_input"],
             "tokens_out": r["tokens_output"],
             "modelo": r["modelo"],
