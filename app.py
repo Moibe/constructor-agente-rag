@@ -18,6 +18,7 @@ import mimetypes
 import funciones
 import modelos as registro_modelos
 import usuarios as registro_usuarios
+import hitos as registro_hitos
 import chatbot as asistente
 import generacion_aumentada
 
@@ -501,6 +502,7 @@ init_bases_conocimiento_db()
 init_agentes_db()
 registro_modelos.init_modelos_db()
 registro_usuarios.init_usuarios_db()
+registro_hitos.init_hitos_db()
 cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
@@ -690,6 +692,19 @@ class UsuarioUpdate(BaseModel):
     # históricos. Para renombrar el slug, crear uno nuevo y desactivar este.
     nombre: Optional[str] = None
     activo: Optional[bool] = None
+    notas: Optional[str] = None
+
+class HitoCreate(BaseModel):
+    nombre: str
+    # ISO 8601. Si no se manda, se usa el momento de creación — pero normalmente
+    # conviene mandar la fecha real en que el cambio entró en vigor (ej. la
+    # fecha del commit/deploy), no la fecha en que se llenó el formulario.
+    fecha: Optional[str] = None
+    notas: Optional[str] = None
+
+class HitoUpdate(BaseModel):
+    nombre: Optional[str] = None
+    fecha: Optional[str] = None
     notas: Optional[str] = None
 
 @app.get("/listarContextos",
@@ -2335,6 +2350,94 @@ def borrar_usuario(usuario_id: str, _: bool = Depends(require_admin)):
         if not conn.execute("SELECT id FROM usuarios WHERE id=?", (usuario_id,)).fetchone():
             raise HTTPException(status_code=404, detail=f"Usuario '{usuario_id}' no encontrado.")
         conn.execute("DELETE FROM usuarios WHERE id=?", (usuario_id,))
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+
+def _validate_fecha_iso(fecha: Optional[str], campo: str = "fecha") -> Optional[str]:
+    """Valida que sea un ISO 8601 parseable y lo devuelve tal cual (no lo
+    normaliza) — el front ya manda UTC con offset."""
+    if fecha is None:
+        return None
+    try:
+        datetime.fromisoformat(fecha)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{campo} debe ser una fecha ISO 8601 válida.")
+    return fecha
+
+
+@app.get("/hitos",
+         tags=["Hitos"],
+         description="Marcadores de línea de tiempo para el reporte de Registros (ej. 'aquí entró el cacheo de LLMs'). Globales, no por proyecto. Solo los usa el admin — requiere token.",
+         summary="Listar Hitos")
+def listar_hitos(_: bool = Depends(require_admin)):
+    return {"hitos": registro_hitos.listar()}
+
+
+@app.post("/hitos",
+          tags=["Hitos"],
+          status_code=201,
+          description="Crea un hito. Si no se manda `fecha`, se usa el momento de creación — pero normalmente conviene mandar la fecha real en que el cambio entró en vigor (ej. la fecha del commit/deploy). Requiere token admin.",
+          summary="Crear Hito")
+def crear_hito(body: HitoCreate, _: bool = Depends(require_admin)):
+    nombre = _validate_nombre(body.nombre)
+    fecha = _validate_fecha_iso(body.fecha) or _now()
+
+    hid = uuid.uuid4().hex
+    now = _now()
+    conn = _agentes_connection()
+    try:
+        conn.execute(
+            f"INSERT INTO hitos ({registro_hitos.COLS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (hid, nombre, fecha, body.notas, now, now),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {registro_hitos.COLS} FROM hitos WHERE id=?", (hid,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@app.put("/hitos/{hito_id}",
+         tags=["Hitos"],
+         description="Actualiza nombre, fecha o notas de un hito. Requiere token admin.",
+         summary="Actualizar Hito")
+def actualizar_hito(hito_id: str, body: HitoUpdate, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        row = conn.execute(f"SELECT {registro_hitos.COLS} FROM hitos WHERE id=?", (hito_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Hito '{hito_id}' no encontrado.")
+        actual = dict(row)
+
+        nombre = actual["nombre"] if body.nombre is None else _validate_nombre(body.nombre)
+        fecha = actual["fecha"] if body.fecha is None else _validate_fecha_iso(body.fecha)
+        notas = actual["notas"] if body.notas is None else body.notas
+
+        conn.execute(
+            "UPDATE hitos SET nombre=?, fecha=?, notas=?, actualizado_en=? WHERE id=?",
+            (nombre, fecha, notas, _now(), hito_id),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {registro_hitos.COLS} FROM hitos WHERE id=?", (hito_id,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@app.delete("/hitos/{hito_id}",
+            tags=["Hitos"],
+            status_code=204,
+            description="Elimina un hito. Requiere token admin.",
+            summary="Borrar Hito")
+def borrar_hito(hito_id: str, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        if not conn.execute("SELECT id FROM hitos WHERE id=?", (hito_id,)).fetchone():
+            raise HTTPException(status_code=404, detail=f"Hito '{hito_id}' no encontrado.")
+        conn.execute("DELETE FROM hitos WHERE id=?", (hito_id,))
         conn.commit()
         return None
     finally:
