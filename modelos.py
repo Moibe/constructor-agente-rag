@@ -22,6 +22,9 @@ from typing import Optional
 
 AGENTES_DB_PATH = os.getenv('AGENTES_DB_PATH', 'agentes.db')
 
+# Default true = comportamiento histórico (el server de CSI tiene Ollama local).
+OLLAMA_HABILITADO = os.getenv('OLLAMA_HABILITADO', 'true').strip().lower() not in ('false', '0', 'no')
+
 COLS = "nombre, proveedor, precio_input_usd_1m, precio_output_usd_1m, activo, notas, actualizado_en"
 
 PROVEEDORES_VALIDOS = ('openai', 'ollama', 'anthropic', 'google')
@@ -36,6 +39,11 @@ PROVEEDORES_VALIDOS = ('openai', 'ollama', 'anthropic', 'google')
 # desde el día uno, pero asignarlos sin haber configurado la API key y el
 # paquete de LangChain correspondiente sólo produciría errores en runtime.
 # Actívalos desde el tab de Tarifas cuando ambos estén listos.
+#
+# Los de Ollama nacen desactivados cuando OLLAMA_HABILITADO=false, que es el
+# caso de cualquier despliegue sin un Ollama alcanzable (p.ej. un droplet
+# compartido, donde correr un LLM local no es viable). Sólo afecta al seed de
+# una BD nueva: nunca pisa lo que ya hayas editado desde el admin.
 _SEED = [
     # nombre, proveedor, input, output, activo, notas
     ('gpt-5.5',       'openai', 5.00,  30.00,  1, 'Verificado 2026-08-07'),
@@ -97,6 +105,9 @@ def init_modelos_db():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_modelos_proveedor ON modelos(proveedor)')
         now = _now()
         for nombre, proveedor, p_in, p_out, activo, notas in _SEED:
+            if proveedor == 'ollama' and not OLLAMA_HABILITADO:
+                activo = 0
+                notas = f'{notas} — desactivado por OLLAMA_HABILITADO=false'
             conn.execute(
                 f"INSERT OR IGNORE INTO modelos ({COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (nombre, proveedor, p_in, p_out, activo, notas, now),

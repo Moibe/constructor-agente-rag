@@ -1,0 +1,39 @@
+name: deploy constructor-agente-rag 🤖
+
+# Segunda instancia del backend, en el droplet gradioFish. Independiente de la
+# de CSI: sus propias agentes.db / logs.db / chroma, su propio .env.
+#
+# El .env NO lo crea este workflow a propósito (lleva OPENAI_API_KEY y
+# ADMIN_PASSWORD). Se crea una sola vez a mano en el droplet — ver DEPLOY.md.
+
+on:
+    push:
+        branches:
+            - dev
+    workflow_dispatch:
+
+jobs:
+    deploy:
+        name: pull · venv · restart
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: install ssh key
+              run: |
+                  install -m 600 -D /dev/null ~/.ssh/id_rsa
+                  echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+                  ssh-keyscan -H ${{ secrets.SSH_HOST }} > ~/.ssh/known_hosts
+
+            # pm2 vive en nvm; una shell SSH no-interactiva no lo carga sola, así
+            # que se exporta nvm explícitamente antes de usarlo (aunque el proceso
+            # en sí sea Python, pm2 es lo que lo supervisa).
+            #
+            # El `[ -f .env ]` corta el deploy si falta la config en vez de
+            # arrancar una instancia sin API key que fallaría en la primera
+            # consulta con un error que no apunta a la causa.
+            - name: deploy on droplet
+              run: |
+                  ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use node >/dev/null && { [ -d ~/code/constructor-agente-rag ] || git clone git@github.com:Moibe/constructor-agente-rag.git ~/code/constructor-agente-rag; } && cd ~/code/constructor-agente-rag && git checkout dev && git pull origin dev && { [ -f .env ] || { echo "::error::Falta ~/code/constructor-agente-rag/.env en el droplet. Créalo una vez siguiendo DEPLOY.md."; exit 1; }; } && { [ -d venv ] || python3 -m venv venv; } && venv/bin/pip install -q -r requirements.txt && (pm2 restart constructor-rag --update-env || pm2 start "venv/bin/python" --name constructor-rag --interpreter none -- -m uvicorn app:app --host 0.0.0.0 --port 8003) && pm2 save'
+
+            - name: cleanup
+              run: rm -rf ~/.ssh

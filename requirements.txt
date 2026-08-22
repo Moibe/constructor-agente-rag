@@ -33,3 +33,9 @@ sacremoses
 
 uvicorn
 python-multipart
+
+# Importados directamente por app.py. Hoy llegan por transitividad de otros
+# paquetes, pero eso no es una garantía: en una instalación limpia (p.ej. el
+# droplet) una resolución distinta los deja fuera y el arranque truena.
+python-dotenv
+httpx
