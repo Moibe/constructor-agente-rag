@@ -1957,27 +1957,28 @@ def listar_registros(
     columna_orden = ORDEN_COLUMNAS.get(orden_por, 'fecha')
     orden_sql = f"{columna_orden} {orden_dir.upper()}, id DESC"
 
-    # UTC, no local: los timestamps en chat_logs son UTC, así que el rango
-    # default ("últimos 7 días") tiene que estar en la misma zona para no
-    # excluir filas de "hoy" cerca de medianoche UTC.
-    today = datetime.now(timezone.utc).date()
+    # Sin desde/hasta: sin filtro de fecha (libre por default). Solo se acota
+    # cuando el usuario elige explícitamente un rango.
     try:
-        hasta_date = date.fromisoformat(hasta) if hasta else today
-        desde_date = date.fromisoformat(desde) if desde else (hasta_date - timedelta(days=7))
+        hasta_date = date.fromisoformat(hasta) if hasta else None
+        desde_date = date.fromisoformat(desde) if desde else None
     except ValueError:
         raise HTTPException(status_code=400, detail="desde/hasta deben tener formato YYYY-MM-DD.")
 
-    if desde_date > hasta_date:
+    if desde_date and hasta_date and desde_date > hasta_date:
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta.")
 
-    desde_str = desde_date.isoformat()
-    upper_exclusive = (hasta_date + timedelta(days=1)).isoformat()
-
-    # WHERE dinámico: arrancamos con el rango de fechas y agregamos los filtros
-    # opcionales. Usar parametrización SQLite (no concatenar strings) para evitar
-    # injection.
-    where_clauses = ["fecha >= ?", "fecha < ?"]
-    where_params = [desde_str, upper_exclusive]
+    # WHERE dinámico: arrancamos vacío y agregamos fecha (si se pidió) y los
+    # demás filtros opcionales. Usar parametrización SQLite (no concatenar
+    # strings) para evitar injection.
+    where_clauses = []
+    where_params = []
+    if desde_date:
+        where_clauses.append("fecha >= ?")
+        where_params.append(desde_date.isoformat())
+    if hasta_date:
+        where_clauses.append("fecha < ?")
+        where_params.append((hasta_date + timedelta(days=1)).isoformat())
     if proyecto:
         where_clauses.append("proyecto_slug = ?")
         where_params.append(proyecto)
@@ -2005,7 +2006,7 @@ def listar_registros(
         where_clauses.append("(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0)) >= ?")
         where_params.append(tokens_min)
 
-    where_sql = " AND ".join(where_clauses)
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
     conn = sqlite3.connect(LOG_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -2066,7 +2067,10 @@ def listar_registros(
         "total": total,
         "limit": limit,
         "offset": offset,
-        "rango": {"desde": desde_date.isoformat(), "hasta": hasta_date.isoformat()},
+        "rango": {
+            "desde": desde_date.isoformat() if desde_date else None,
+            "hasta": hasta_date.isoformat() if hasta_date else None,
+        },
     }
 
 
