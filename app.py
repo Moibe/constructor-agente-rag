@@ -361,6 +361,7 @@ def init_agentes_db():
         color_boton_enviar TEXT,
         color_texto_header TEXT,
         color_icono       TEXT,
+        color_icono_boton TEXT,
         mensaje_inicial   TEXT,
         top_k             INTEGER NOT NULL DEFAULT 1
     )''')
@@ -380,6 +381,7 @@ def init_agentes_db():
         ('color_boton_enviar', 'TEXT'),
         ('color_texto_header', 'TEXT'),
         ('color_icono', 'TEXT'),
+        ('color_icono_boton', 'TEXT'),
         ('mensaje_inicial', 'TEXT'),
         ('top_k', 'INTEGER NOT NULL DEFAULT 1'),
     ):
@@ -412,6 +414,7 @@ def init_agentes_db():
             color_boton_enviar TEXT,
             color_texto_header TEXT,
             color_icono       TEXT,
+            color_icono_boton TEXT,
             mensaje_inicial   TEXT,
             top_k             INTEGER NOT NULL DEFAULT 1
         )''')
@@ -420,7 +423,7 @@ def init_agentes_db():
                    modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en,
                    color_primario, color_burbuja_bot, color_fondo_chat, color_header,
                    color_avatar, color_boton_enviar, color_texto_header, color_icono,
-                   mensaje_inicial, top_k
+                   color_icono_boton, mensaje_inicial, top_k
             FROM agentes''')
         conn.execute('DROP TABLE agentes')
         conn.execute('ALTER TABLE agentes__new RENAME TO agentes')
@@ -610,6 +613,7 @@ class AgenteCreate(BaseModel):
     color_boton_enviar: Optional[str] = None
     color_texto_header: Optional[str] = None
     color_icono: Optional[str] = None
+    color_icono_boton: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: int = 1
 
@@ -628,6 +632,7 @@ class AgenteUpdate(BaseModel):
     color_boton_enviar: Optional[str] = None
     color_texto_header: Optional[str] = None
     color_icono: Optional[str] = None
+    color_icono_boton: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: Optional[int] = None
     # Sentinels para detectar intentos de modificar campos inmutables
@@ -653,6 +658,7 @@ class Agente(BaseModel):
     color_boton_enviar: Optional[str] = None
     color_texto_header: Optional[str] = None
     color_icono: Optional[str] = None
+    color_icono_boton: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: int = 1
 
@@ -1208,7 +1214,7 @@ def borrar_documento(data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header, color_avatar, color_boton_enviar, color_texto_header, color_icono, mensaje_inicial, top_k"
+_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header, color_avatar, color_boton_enviar, color_texto_header, color_icono, color_icono_boton, mensaje_inicial, top_k"
 _PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en, password"
 
 @app.get("/proyectos",
@@ -1553,6 +1559,7 @@ def crear_agente(body: AgenteCreate):
     color_boton_enviar = _validate_color(body.color_boton_enviar, "color_boton_enviar")
     color_texto_header = _validate_color(body.color_texto_header, "color_texto_header")
     color_icono = _validate_color(body.color_icono, "color_icono")
+    color_icono_boton = _validate_color(body.color_icono_boton, "color_icono_boton")
     mensaje_inicial = _validate_mensaje_inicial(body.mensaje_inicial)
     top_k = _validate_top_k(body.top_k)
     _validate_proyecto_existe(body.proyecto_id)
@@ -1568,10 +1575,11 @@ def crear_agente(body: AgenteCreate):
             raise HTTPException(status_code=409, detail=f"Ya existe un agente con slug '{slug}'.")
 
         conn.execute(
-            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, body.proyecto_id, now, now,
              color_primario, color_burbuja_bot, color_fondo_chat, color_header,
-             color_avatar, color_boton_enviar, color_texto_header, color_icono, mensaje_inicial, top_k),
+             color_avatar, color_boton_enviar, color_texto_header, color_icono,
+             color_icono_boton, mensaje_inicial, top_k),
         )
         conn.commit()
         row = conn.execute(
@@ -1678,6 +1686,10 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             actual["color_icono"] if body.color_icono is None
             else _validate_color(body.color_icono, "color_icono")
         )
+        color_icono_boton = (
+            actual["color_icono_boton"] if body.color_icono_boton is None
+            else _validate_color(body.color_icono_boton, "color_icono_boton")
+        )
         # `mensaje_inicial`: igual que `contexto`, distinguir "no enviado" (no tocar)
         # de "enviado como null/empty" (resetear a NULL para que el frontend use su default).
         if 'mensaje_inicial' in body.model_fields_set:
@@ -1701,11 +1713,11 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             _validate_bc_pertenece_a_proyecto(contexto, proyecto_id_efectivo)
 
         conn.execute(
-            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, color_primario=?, color_burbuja_bot=?, color_fondo_chat=?, color_header=?, color_avatar=?, color_boton_enviar=?, color_texto_header=?, color_icono=?, mensaje_inicial=?, top_k=?, actualizado_en=? WHERE id=?",
+            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, color_primario=?, color_burbuja_bot=?, color_fondo_chat=?, color_header=?, color_avatar=?, color_boton_enviar=?, color_texto_header=?, color_icono=?, color_icono_boton=?, mensaje_inicial=?, top_k=?, actualizado_en=? WHERE id=?",
             (nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id_efectivo,
              color_primario, color_burbuja_bot, color_fondo_chat, color_header,
              color_avatar, color_boton_enviar, color_texto_header, color_icono,
-             mensaje_inicial, top_k, _now(), aid),
+             color_icono_boton, mensaje_inicial, top_k, _now(), aid),
         )
         conn.commit()
         row = conn.execute(
