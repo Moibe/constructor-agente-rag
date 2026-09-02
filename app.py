@@ -1716,7 +1716,7 @@ def registrar_log(data: LogRequest):
          tags=["Consumo"],
          description="Métricas agregadas del periodo (por defecto últimos 30 días). Fuente: logs.db + agentes.db + Chroma. Pensado para el dashboard de Consumo del admin.",
          summary="Resumen de Consumo")
-def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, usuario: Optional[str] = None):
+def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, usuario: Optional[str] = None, asistente: Optional[str] = None):
     from datetime import date, timedelta, datetime, timezone
 
     # UTC, igual que /registros. Con date.today() local el rango terminaba antes
@@ -1736,35 +1736,40 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
     # gracias al orden lexicográfico.
     upper_exclusive = (hasta_date + timedelta(days=1)).isoformat()
 
-    # Filtro opcional por usuario final (slug). Se anexa al final del WHERE de
-    # cada query de abajo — el orden de los AND no importa para el resultado.
+    # Filtros opcionales por usuario final y/o asistente (slugs). Se anexan al
+    # final del WHERE de cada query de abajo — el orden de los AND no importa
+    # para el resultado.
     usuario_sql = " AND usuario_slug = ?" if usuario else ""
     usuario_params = [usuario] if usuario else []
+    asistente_sql = " AND asistente_slug = ?" if asistente else ""
+    asistente_params = [asistente] if asistente else []
+    extra_sql = usuario_sql + asistente_sql
+    extra_params = [*usuario_params, *asistente_params]
 
     conn = sqlite3.connect(LOG_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         total_row = conn.execute(
-            f"SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?{usuario_sql}",
-            (desde_str, upper_exclusive, *usuario_params),
+            f"SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?{extra_sql}",
+            (desde_str, upper_exclusive, *extra_params),
         ).fetchone()
         llamadas_total = total_row["c"]
 
         errores_row = conn.execute(
-            f"SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? AND error IS NOT NULL AND error != ''{usuario_sql}",
-            (desde_str, upper_exclusive, *usuario_params),
+            f"SELECT COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ? AND error IS NOT NULL AND error != ''{extra_sql}",
+            (desde_str, upper_exclusive, *extra_params),
         ).fetchone()
         errores_total = errores_row["c"]
 
         lat_row = conn.execute(
-            f"SELECT AVG(ms) AS a FROM chat_logs WHERE fecha >= ? AND fecha < ? AND (error IS NULL OR error = '') AND ms IS NOT NULL{usuario_sql}",
-            (desde_str, upper_exclusive, *usuario_params),
+            f"SELECT AVG(ms) AS a FROM chat_logs WHERE fecha >= ? AND fecha < ? AND (error IS NULL OR error = '') AND ms IS NOT NULL{extra_sql}",
+            (desde_str, upper_exclusive, *extra_params),
         ).fetchone()
         latencia_promedio_ms = int(lat_row["a"]) if lat_row["a"] is not None else None
 
         dia_rows = conn.execute(
-            f"SELECT substr(fecha, 1, 10) AS dia, COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?{usuario_sql} GROUP BY dia ORDER BY dia ASC",
-            (desde_str, upper_exclusive, *usuario_params),
+            f"SELECT substr(fecha, 1, 10) AS dia, COUNT(*) AS c FROM chat_logs WHERE fecha >= ? AND fecha < ?{extra_sql} GROUP BY dia ORDER BY dia ASC",
+            (desde_str, upper_exclusive, *extra_params),
         ).fetchall()
         llamadas_por_dia = [{"fecha": r["dia"], "count": r["c"]} for r in dia_rows]
 
@@ -1774,10 +1779,10 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
                       SUM(CASE WHEN error IS NOT NULL AND error != '' THEN 1 ELSE 0 END) AS errores,
                       AVG(CASE WHEN (error IS NULL OR error = '') THEN ms END) AS lat
                FROM chat_logs
-               WHERE fecha >= ? AND fecha < ?{usuario_sql}
+               WHERE fecha >= ? AND fecha < ?{extra_sql}
                GROUP BY agente_id
                ORDER BY total DESC""",
-            (desde_str, upper_exclusive, *usuario_params),
+            (desde_str, upper_exclusive, *extra_params),
         ).fetchall()
 
         # Sumamos el costo YA PERSISTIDO, no lo recalculamos. `costo_usd` puede
@@ -1793,9 +1798,9 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
                       SUM(CASE WHEN costo_usd IS NULL THEN 1 ELSE 0 END) AS sin_tarifa
                FROM chat_logs
                WHERE fecha >= ? AND fecha < ?
-                 AND (tokens_input IS NOT NULL OR tokens_output IS NOT NULL){usuario_sql}
+                 AND (tokens_input IS NOT NULL OR tokens_output IS NOT NULL){extra_sql}
                GROUP BY modelo, proveedor""",
-            (desde_str, upper_exclusive, *usuario_params),
+            (desde_str, upper_exclusive, *extra_params),
         ).fetchall()
     finally:
         conn.close()
