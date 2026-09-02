@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import shutil
 import sqlite3
 import json
@@ -58,6 +59,19 @@ AGENTES_DB_PATH = os.getenv('AGENTES_DB_PATH', 'agentes.db')
 
 _SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 
+# Ícono custom del avatar: se guarda como data URI dentro de la fila del agente
+# (no en disco) para que viaje en la misma respuesta de /agentes que el widget ya
+# pide — sin rutas estáticas nuevas que romper detrás del proxy. El cap es chico
+# a propósito: el ícono se muestra a 36px, no necesita más.
+ICONO_MAX_BYTES = 64 * 1024
+ICONO_MIME_PERMITIDOS = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'image/svg+xml': '.svg',
+}
+
 def _agentes_connection():
     conn = sqlite3.connect(AGENTES_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -113,6 +127,27 @@ def _validate_mensaje_inicial(value: Optional[str]) -> Optional[str]:
         return None
     if len(s) > 500:
         raise HTTPException(status_code=400, detail="mensaje_inicial excede 500 caracteres.")
+    return s
+
+def _validate_icono_url(value: Optional[str]) -> Optional[str]:
+    """Ícono custom del avatar. Guarda un data URI (el upload lo genera) o una URL
+    http(s) si algún día se hostea aparte. Empty/whitespace → None (usa el ícono
+    default del widget). El cap de tamaño real se aplica en el upload; acá solo
+    se acota para que nadie meta un blob gigante por PATCH directo."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="icono_url debe ser string.")
+    s = value.strip()
+    if not s:
+        return None
+    if not (s.startswith('data:image/') or s.startswith('http://') or s.startswith('https://')):
+        raise HTTPException(
+            status_code=400,
+            detail="icono_url debe ser un data URI de imagen o una URL http(s).",
+        )
+    if len(s) > ICONO_MAX_BYTES * 2:
+        raise HTTPException(status_code=400, detail="icono_url excede el tamaño permitido.")
     return s
 
 def _validate_color(value: Optional[str], field_name: str) -> Optional[str]:
@@ -362,6 +397,7 @@ def init_agentes_db():
         color_texto_header TEXT,
         color_icono       TEXT,
         color_icono_boton TEXT,
+        icono_url         TEXT,
         mensaje_inicial   TEXT,
         top_k             INTEGER NOT NULL DEFAULT 1
     )''')
@@ -382,6 +418,7 @@ def init_agentes_db():
         ('color_texto_header', 'TEXT'),
         ('color_icono', 'TEXT'),
         ('color_icono_boton', 'TEXT'),
+        ('icono_url', 'TEXT'),
         ('mensaje_inicial', 'TEXT'),
         ('top_k', 'INTEGER NOT NULL DEFAULT 1'),
     ):
@@ -415,6 +452,7 @@ def init_agentes_db():
             color_texto_header TEXT,
             color_icono       TEXT,
             color_icono_boton TEXT,
+            icono_url         TEXT,
             mensaje_inicial   TEXT,
             top_k             INTEGER NOT NULL DEFAULT 1
         )''')
@@ -423,7 +461,7 @@ def init_agentes_db():
                    modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en,
                    color_primario, color_burbuja_bot, color_fondo_chat, color_header,
                    color_avatar, color_boton_enviar, color_texto_header, color_icono,
-                   color_icono_boton, mensaje_inicial, top_k
+                   color_icono_boton, icono_url, mensaje_inicial, top_k
             FROM agentes''')
         conn.execute('DROP TABLE agentes')
         conn.execute('ALTER TABLE agentes__new RENAME TO agentes')
@@ -614,6 +652,7 @@ class AgenteCreate(BaseModel):
     color_texto_header: Optional[str] = None
     color_icono: Optional[str] = None
     color_icono_boton: Optional[str] = None
+    icono_url: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: int = 1
 
@@ -633,6 +672,7 @@ class AgenteUpdate(BaseModel):
     color_texto_header: Optional[str] = None
     color_icono: Optional[str] = None
     color_icono_boton: Optional[str] = None
+    icono_url: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: Optional[int] = None
     # Sentinels para detectar intentos de modificar campos inmutables
@@ -659,6 +699,7 @@ class Agente(BaseModel):
     color_texto_header: Optional[str] = None
     color_icono: Optional[str] = None
     color_icono_boton: Optional[str] = None
+    icono_url: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: int = 1
 
@@ -1214,7 +1255,7 @@ def borrar_documento(data: DeleteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno al eliminar documentos: {e}")
 
-_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header, color_avatar, color_boton_enviar, color_texto_header, color_icono, color_icono_boton, mensaje_inicial, top_k"
+_AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header, color_avatar, color_boton_enviar, color_texto_header, color_icono, color_icono_boton, icono_url, mensaje_inicial, top_k"
 _PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en, password"
 
 @app.get("/proyectos",
@@ -1560,6 +1601,7 @@ def crear_agente(body: AgenteCreate):
     color_texto_header = _validate_color(body.color_texto_header, "color_texto_header")
     color_icono = _validate_color(body.color_icono, "color_icono")
     color_icono_boton = _validate_color(body.color_icono_boton, "color_icono_boton")
+    icono_url = _validate_icono_url(body.icono_url)
     mensaje_inicial = _validate_mensaje_inicial(body.mensaje_inicial)
     top_k = _validate_top_k(body.top_k)
     _validate_proyecto_existe(body.proyecto_id)
@@ -1575,11 +1617,11 @@ def crear_agente(body: AgenteCreate):
             raise HTTPException(status_code=409, detail=f"Ya existe un agente con slug '{slug}'.")
 
         conn.execute(
-            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (aid, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, body.proyecto_id, now, now,
              color_primario, color_burbuja_bot, color_fondo_chat, color_header,
              color_avatar, color_boton_enviar, color_texto_header, color_icono,
-             color_icono_boton, mensaje_inicial, top_k),
+             color_icono_boton, icono_url, mensaje_inicial, top_k),
         )
         conn.commit()
         row = conn.execute(
@@ -1690,6 +1732,12 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             actual["color_icono_boton"] if body.color_icono_boton is None
             else _validate_color(body.color_icono_boton, "color_icono_boton")
         )
+        # `icono_url`: mismo criterio que `mensaje_inicial` — mandarlo vacío lo
+        # limpia (vuelve al ícono default del widget); no mandarlo no lo toca.
+        if 'icono_url' in body.model_fields_set:
+            icono_url = _validate_icono_url(body.icono_url)
+        else:
+            icono_url = actual["icono_url"]
         # `mensaje_inicial`: igual que `contexto`, distinguir "no enviado" (no tocar)
         # de "enviado como null/empty" (resetear a NULL para que el frontend use su default).
         if 'mensaje_inicial' in body.model_fields_set:
@@ -1713,11 +1761,11 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             _validate_bc_pertenece_a_proyecto(contexto, proyecto_id_efectivo)
 
         conn.execute(
-            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, color_primario=?, color_burbuja_bot=?, color_fondo_chat=?, color_header=?, color_avatar=?, color_boton_enviar=?, color_texto_header=?, color_icono=?, color_icono_boton=?, mensaje_inicial=?, top_k=?, actualizado_en=? WHERE id=?",
+            "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, color_primario=?, color_burbuja_bot=?, color_fondo_chat=?, color_header=?, color_avatar=?, color_boton_enviar=?, color_texto_header=?, color_icono=?, color_icono_boton=?, icono_url=?, mensaje_inicial=?, top_k=?, actualizado_en=? WHERE id=?",
             (nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id_efectivo,
              color_primario, color_burbuja_bot, color_fondo_chat, color_header,
              color_avatar, color_boton_enviar, color_texto_header, color_icono,
-             color_icono_boton, mensaje_inicial, top_k, _now(), aid),
+             color_icono_boton, icono_url, mensaje_inicial, top_k, _now(), aid),
         )
         conn.commit()
         row = conn.execute(
@@ -1727,6 +1775,64 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
         return dict(row)
     finally:
         conn.close()
+
+@app.post("/agentes/{aid}/icono",
+          tags=["Agentes"],
+          description="Sube el ícono custom del avatar del widget. Se guarda como data URI en la fila del agente (no en disco) para que viaje junto al resto de la config y no dependa de rutas estáticas. Máximo 64KB; formatos: png, jpg, webp, gif, svg. Requiere token admin.",
+          summary="Subir Ícono de Agente")
+async def subir_icono_agente(aid: str, icono: UploadFile = File(...), _: bool = Depends(require_admin)):
+    mime = (icono.content_type or '').split(';')[0].strip().lower()
+    if mime not in ICONO_MIME_PERMITIDOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato no permitido: '{mime or 'desconocido'}'. Válidos: {', '.join(sorted(ICONO_MIME_PERMITIDOS))}.",
+        )
+
+    contenido = await icono.read()
+    if not contenido:
+        raise HTTPException(status_code=400, detail="El archivo está vacío.")
+    if len(contenido) > ICONO_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El ícono pesa {len(contenido) // 1024}KB; el máximo es {ICONO_MAX_BYTES // 1024}KB. Se muestra a 36px, no necesita más resolución.",
+        )
+
+    data_uri = f"data:{mime};base64,{base64.b64encode(contenido).decode('ascii')}"
+
+    conn = _agentes_connection()
+    try:
+        if not conn.execute("SELECT id FROM agentes WHERE id=?", (aid,)).fetchone():
+            raise HTTPException(status_code=404, detail=f"Agente '{aid}' no encontrado.")
+        conn.execute(
+            "UPDATE agentes SET icono_url=?, actualizado_en=? WHERE id=?",
+            (data_uri, _now(), aid),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?", (aid,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+@app.delete("/agentes/{aid}/icono",
+            tags=["Agentes"],
+            description="Quita el ícono custom del agente; el widget vuelve a usar su ícono por defecto. Requiere token admin.",
+            summary="Quitar Ícono de Agente")
+def borrar_icono_agente(aid: str, _: bool = Depends(require_admin)):
+    conn = _agentes_connection()
+    try:
+        if not conn.execute("SELECT id FROM agentes WHERE id=?", (aid,)).fetchone():
+            raise HTTPException(status_code=404, detail=f"Agente '{aid}' no encontrado.")
+        conn.execute(
+            "UPDATE agentes SET icono_url=NULL, actualizado_en=? WHERE id=?",
+            (_now(), aid),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?", (aid,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
 
 @app.delete("/agentes/{aid}",
             tags=["Agentes"],
