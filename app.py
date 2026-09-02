@@ -1814,6 +1814,7 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
     for r in agente_rows:
         info = agentes_map.get(r["agente_id"], {"slug": "<borrado>", "nombre": "<borrado>"})
         llamadas_por_asistente.append({
+            "agente_id": r["agente_id"],
             "slug": info["slug"],
             "nombre": info["nombre"],
             "count": r["total"],
