@@ -39,3 +39,9 @@ python-multipart
 # droplet) una resolución distinta los deja fuera y el arranque truena.
 python-dotenv
 httpx
+
+# Hash de contraseñas de los operadores (ver operadores.py). Hoy ya llega por
+# transitividad de chromadb, pero igual que python-dotenv/httpx eso no es
+# garantía: una resolución distinta en una instalación limpia lo deja fuera y
+# el login truena al arrancar.
+bcrypt

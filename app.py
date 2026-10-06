@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import json
 import asyncio
+import secrets
 import uuid
 import httpx
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ import modelos as registro_modelos
 import usuarios as registro_usuarios
 import hitos as registro_hitos
 import keys_openai
+import operadores as registro_operadores
 import chatbot as asistente
 import generacion_aumentada
 
@@ -244,21 +246,67 @@ def _validate_bc_pertenece_a_proyecto(nombre_chroma: str, proyecto_id: str):
     finally:
         conn.close()
 
-def require_admin(authorization: Optional[str] = Header(default=None)) -> bool:
-    """Dependencia FastAPI: exige `Authorization: Bearer <ADMIN_PASSWORD>`.
-    El password se compara contra `ADMIN_PASSWORD` del .env del server.
-    Levanta 401 si falta header, formato malo o token incorrecto.
-    Levanta 500 si el server no tiene `ADMIN_PASSWORD` configurado (mejor
-    fallar ruidosamente que abrirse a todo el mundo)."""
-    expected = os.getenv("ADMIN_PASSWORD")
-    if not expected:
-        raise HTTPException(status_code=500, detail="ADMIN_PASSWORD no configurado en server")
+def _token_del_header(authorization: Optional[str]) -> Optional[str]:
+    """El valor crudo de `Authorization: Bearer <x>`, o None si no viene bien."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token admin requerido")
-    token = authorization[len("Bearer "):].strip()
-    if token != expected:
-        raise HTTPException(status_code=401, detail="Token admin inválido")
-    return True
+        return None
+    return authorization[len("Bearer "):].strip() or None
+
+
+def identidad_actual(authorization: Optional[str] = Header(default=None)) -> Optional[dict]:
+    """Quién manda el request, o None si no se identificó. No levanta 401 — de
+    eso se encarga `require_admin`, para que un endpoint pueda ser público y aun
+    así saber quién entró.
+
+    Acepta dos credenciales, a propósito, mientras dura la transición al login:
+    - **Sesión de un operador** (token de `POST /auth/login`). Trae identidad:
+      se sabe quién es y con qué rol.
+    - **`ADMIN_PASSWORD` del .env** (el `?admin=<token>` de siempre). Vale como
+      superadmin pero SIN identidad: no se sabe quién lo usó. Es lo que hay que
+      apagar cuando todos tengan cuenta — ver operadores.py.
+    """
+    token = _token_del_header(authorization)
+    if not token:
+        return None
+
+    operador = registro_operadores.resolver_sesion(token)
+    if operador:
+        return {"tipo": "operador", "operador": operador, "rol": operador["rol"], "id": operador["id"]}
+
+    esperado = os.getenv("ADMIN_PASSWORD")
+    # compare_digest en vez de != para no filtrar el password por el tiempo que
+    # tarda la comparación.
+    if esperado and secrets.compare_digest(token, esperado):
+        return {"tipo": "legacy", "operador": None, "rol": "superadmin", "id": None}
+
+    return None
+
+
+def require_admin(identidad: Optional[dict] = Depends(identidad_actual)) -> dict:
+    """Dependencia FastAPI: exige una credencial válida (sesión de operador o el
+    `ADMIN_PASSWORD` legacy) y devuelve la identidad.
+
+    Levanta 401 si falta, está mal formada o no corresponde a nadie.
+    Levanta 500 si el server no tiene NINGUNA forma de autenticar configurada
+    (ni ADMIN_PASSWORD ni un solo operador): mejor fallar ruidosamente que dejar
+    al admin preguntándose por qué todo le responde 401."""
+    if identidad is not None:
+        return identidad
+    if not os.getenv("ADMIN_PASSWORD") and registro_operadores.contar() == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="El servidor no tiene forma de autenticar: configura ADMIN_PASSWORD "
+                   "o siembra un superadmin con SUPERADMIN_EMAIL/SUPERADMIN_PASSWORD en el .env.",
+        )
+    raise HTTPException(status_code=401, detail="Credencial de admin requerida o inválida")
+
+
+def require_superadmin(identidad: dict = Depends(require_admin)) -> dict:
+    """Sólo superadmin. Para lo que administra el propio sistema de cuentas.
+    El ADMIN_PASSWORD legacy cuenta como superadmin mientras siga vivo."""
+    if identidad["rol"] != "superadmin":
+        raise HTTPException(status_code=403, detail="Esta operación requiere rol superadmin.")
+    return identidad
 
 
 def init_log_db():
@@ -563,6 +611,9 @@ registro_modelos.init_modelos_db()
 registro_usuarios.init_usuarios_db()
 registro_hitos.init_hitos_db()
 keys_openai.init_configuracion_db()
+registro_operadores.init_operadores_db()
+registro_operadores.sembrar_superadmin()
+registro_operadores.limpiar_sesiones_vencidas()
 cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
@@ -788,6 +839,14 @@ class HitoUpdate(BaseModel):
 class KeysOpenAIUpdate(BaseModel):
     # 'auto' | 'principal' | 'respaldo' — ver keys_openai.py
     modo: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class CambiarPasswordRequest(BaseModel):
+    password_actual: str
+    password_nueva: str
 
 @app.get("/listarContextos",
          tags=["Contextos"])
@@ -2789,10 +2848,74 @@ def health():
 
 @app.post("/admin/verify",
           tags=["Admin"],
-          description="Valida el token admin (Authorization: Bearer <token>). El frontend lo llama al pegar la URL con el param para confirmar antes de persistirlo en localStorage.",
+          description="Valida la credencial de admin (Authorization: Bearer <token>), sea una sesión de operador o el ADMIN_PASSWORD legacy. El frontend lo llama al pegar la URL con el param para confirmar antes de persistirlo en localStorage.",
           summary="Verificar token admin")
-def admin_verify(_: bool = Depends(require_admin)):
-    return {"ok": True}
+def admin_verify(identidad: dict = Depends(require_admin)):
+    # `tipo` deja que el front sepa si entró con cuenta propia o con el token
+    # compartido, para poder empujar al login cuando sea lo segundo.
+    return {"ok": True, "tipo": identidad["tipo"], "rol": identidad["rol"], "operador": identidad["operador"]}
+
+
+@app.post("/auth/login",
+          tags=["Auth"],
+          description="Entra con email y contraseña de operador. Devuelve un token de sesión para mandar como `Authorization: Bearer <token>`. Público por necesidad: es la puerta de entrada.",
+          summary="Iniciar sesión")
+def auth_login(body: LoginRequest):
+    try:
+        operador = registro_operadores.autenticar(body.email, body.password)
+    except registro_operadores.CuentaBloqueada as e:
+        # 429 y no 401: el problema ya no son las credenciales sino el ritmo.
+        raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": str(e.segundos)})
+
+    if not operador:
+        # Mismo mensaje para email inexistente, contraseña mala y cuenta
+        # desactivada: quien tantea no tiene por qué saber qué emails existen.
+        raise HTTPException(status_code=401, detail="Email o contraseña incorrectos.")
+
+    sesion = registro_operadores.crear_sesion(operador["id"])
+    logger.info("[AUTH] Entró '%s' (rol %s).", operador["email"], operador["rol"])
+    return {"token": sesion["token"], "expira_en": sesion["expira_en"], "operador": operador}
+
+
+@app.post("/auth/logout",
+          tags=["Auth"],
+          description="Cierra la sesión del token que venga en el header. Idempotente: si el token ya no existe responde igual, para que el front siempre pueda limpiar su localStorage.",
+          summary="Cerrar sesión")
+def auth_logout(authorization: Optional[str] = Header(default=None)):
+    token = _token_del_header(authorization)
+    cerrada = registro_operadores.cerrar_sesion(token) if token else False
+    return {"ok": True, "sesion_cerrada": cerrada}
+
+
+@app.get("/auth/yo",
+         tags=["Auth"],
+         description="Quién soy: identidad de la credencial actual. `tipo` es 'operador' (cuenta propia) o 'legacy' (ADMIN_PASSWORD compartido, sin identidad).",
+         summary="Identidad actual")
+def auth_yo(identidad: dict = Depends(require_admin)):
+    return identidad
+
+
+@app.post("/auth/cambiar-password",
+          tags=["Auth"],
+          description="Cambia la contraseña del operador de la sesión actual, pidiendo la contraseña vigente. Cierra las demás sesiones de esa cuenta. No aplica al ADMIN_PASSWORD legacy, que se cambia en el .env del server.",
+          summary="Cambiar mi contraseña")
+def auth_cambiar_password(body: CambiarPasswordRequest, identidad: dict = Depends(require_admin)):
+    if identidad["tipo"] != "operador":
+        raise HTTPException(
+            status_code=400,
+            detail="Entraste con el token compartido (ADMIN_PASSWORD), que no es una cuenta: "
+                   "no hay contraseña que cambiar aquí. Ese se cambia en el .env del servidor.",
+        )
+    if not registro_operadores.autenticar_id(identidad["id"], body.password_actual):
+        raise HTTPException(status_code=401, detail="La contraseña actual no es correcta.")
+    try:
+        registro_operadores.cambiar_password(identidad["id"], body.password_nueva)
+    except registro_operadores.PasswordInvalida as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Se cerraron todas las sesiones, incluida la de quien pidió el cambio:
+    # devolvemos una nueva para no echarlo del panel por cambiar su contraseña.
+    sesion = registro_operadores.crear_sesion(identidad["id"])
+    return {"ok": True, "token": sesion["token"], "expira_en": sesion["expira_en"]}
 
 if __name__ == '__main__':
     import uvicorn
