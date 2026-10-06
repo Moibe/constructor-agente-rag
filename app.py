@@ -848,6 +848,20 @@ class CambiarPasswordRequest(BaseModel):
     password_actual: str
     password_nueva: str
 
+class OperadorCreate(BaseModel):
+    email: str
+    nombre: str
+    password: str
+    rol: str = 'admin'
+
+class OperadorUpdate(BaseModel):
+    nombre: Optional[str] = None
+    rol: Optional[str] = None
+    activo: Optional[bool] = None
+
+class OperadorPasswordReset(BaseModel):
+    password_nueva: str
+
 @app.get("/listarContextos",
          tags=["Contextos"])
 def listar_contextos(proyecto_id: Optional[str] = None):
@@ -2836,6 +2850,117 @@ def actualizar_keys_openai(body: KeysOpenAIUpdate, _: bool = Depends(require_adm
         )
     keys_openai.guardar_modo(modo)
     return keys_openai.estado()
+
+
+def _validar_rol_asignable(rol: str) -> str:
+    r = (rol or "").strip().lower()
+    if r in registro_operadores.ROLES and r not in registro_operadores.ROLES_ASIGNABLES:
+        # El rol existe en el esquema pero todavía no se puede asignar: decirlo
+        # así, en vez de "rol inválido", que haría pensar que es un typo.
+        raise HTTPException(
+            status_code=400,
+            detail=f"El rol '{r}' todavía no se puede asignar: el filtrado por proyecto no está "
+                   "implementado, así que una cuenta con ese rol tendría los mismos permisos que "
+                   f"un admin. Válidos por ahora: {', '.join(registro_operadores.ROLES_ASIGNABLES)}.",
+        )
+    if r not in registro_operadores.ROLES_ASIGNABLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"rol inválido: '{rol}'. Válidos: {', '.join(registro_operadores.ROLES_ASIGNABLES)}.",
+        )
+    return r
+
+
+def _no_contra_si_mismo(identidad: dict, operador_id: str, accion: str):
+    """Evita que alguien se desactive, se degrade o se borre a sí mismo.
+
+    El guard de 'último superadmin' ya cubre el caso grave, pero este da un
+    mensaje mucho más claro cuando lo que pasó es simplemente que te
+    equivocaste de fila. Con el ADMIN_PASSWORD legacy no aplica: no es una
+    cuenta, así que no hay 'sí mismo' que proteger."""
+    if identidad.get("id") and identidad["id"] == operador_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No puedes {accion} tu propia cuenta. Pídeselo a otro superadmin.",
+        )
+
+
+@app.get("/operadores",
+         tags=["Operadores"],
+         description="Lista los operadores que pueden entrar al panel (nunca incluye el hash de la contraseña). Requiere rol superadmin.",
+         summary="Listar Operadores")
+def listar_operadores(_: dict = Depends(require_superadmin)):
+    return {
+        "operadores": registro_operadores.listar(),
+        # Para que el front arme el dropdown con lo que de verdad se puede
+        # asignar hoy, en vez de duplicar la lista y desincronizarse.
+        "roles_asignables": list(registro_operadores.ROLES_ASIGNABLES),
+    }
+
+
+@app.post("/operadores",
+          tags=["Operadores"],
+          status_code=201,
+          description="Da de alta un operador con su contraseña inicial. El email es único (sin importar mayúsculas) y es la credencial de entrada. Requiere rol superadmin.",
+          summary="Crear Operador")
+def crear_operador(body: OperadorCreate, _: dict = Depends(require_superadmin)):
+    rol = _validar_rol_asignable(body.rol)
+    try:
+        return registro_operadores.crear(body.email, body.nombre, body.password, rol=rol)
+    except registro_operadores.EmailDuplicado as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except registro_operadores.PasswordInvalida as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/operadores/{operador_id}",
+         tags=["Operadores"],
+         description="Cambia nombre, rol o estado de un operador. Desactivarlo cierra sus sesiones al instante. No deja dejar al sistema sin superadmin activo ni modificar la propia cuenta. El email es inmutable: es la credencial y lo que identifica sus sesiones. Requiere rol superadmin.",
+         summary="Actualizar Operador")
+def actualizar_operador(operador_id: str, body: OperadorUpdate, identidad: dict = Depends(require_superadmin)):
+    if body.rol is not None or body.activo is not None:
+        _no_contra_si_mismo(identidad, operador_id, "cambiarle el rol ni desactivar")
+    rol = None if body.rol is None else _validar_rol_asignable(body.rol)
+    try:
+        return registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol, activo=body.activo)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except registro_operadores.UltimoSuperadmin as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/operadores/{operador_id}/password",
+          tags=["Operadores"],
+          description="Le pone una contraseña nueva a un operador que la perdió, sin pedir la anterior. Cierra todas sus sesiones. Para cambiar la propia con la contraseña vigente está /auth/cambiar-password. Requiere rol superadmin.",
+          summary="Restablecer contraseña de un Operador")
+def resetear_password_operador(operador_id: str, body: OperadorPasswordReset, _: dict = Depends(require_superadmin)):
+    if registro_operadores.obtener(operador_id) is None:
+        raise HTTPException(status_code=404, detail=f"No existe el operador '{operador_id}'.")
+    try:
+        registro_operadores.cambiar_password(operador_id, body.password_nueva)
+    except registro_operadores.PasswordInvalida as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@app.delete("/operadores/{operador_id}",
+            tags=["Operadores"],
+            status_code=204,
+            description="Borra un operador y sus sesiones. No deja borrar la propia cuenta ni al último superadmin activo. Los registros históricos no se tocan. Requiere rol superadmin.",
+            summary="Borrar Operador")
+def borrar_operador(operador_id: str, identidad: dict = Depends(require_superadmin)):
+    _no_contra_si_mismo(identidad, operador_id, "borrar")
+    try:
+        registro_operadores.borrar(operador_id)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except registro_operadores.UltimoSuperadmin as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return None
 
 
 @app.get("/health",

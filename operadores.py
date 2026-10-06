@@ -52,6 +52,12 @@ COLS_PUBLICAS = ("id", "email", "nombre", "rol", "activo", "creado_en", "actuali
 
 ROLES = ('superadmin', 'admin', 'cliente')
 
+# Lo que hoy se puede asignar desde el panel. 'cliente' queda fuera a propósito:
+# el filtrado por proyecto NO existe todavía, así que una cuenta con ese rol
+# tendría de hecho los mismos permisos que un admin — justo lo contrario de lo
+# que su nombre promete. Se abre cuando el scoping por proyecto esté hecho.
+ROLES_ASIGNABLES = ('superadmin', 'admin')
+
 # bcrypt 5 levanta ValueError arriba de 72 bytes en vez de truncar en silencio,
 # así que el límite se valida antes y el usuario recibe un mensaje claro.
 PASSWORD_MAX_BYTES = 72
@@ -224,6 +230,88 @@ def crear(email: str, nombre: str, password: str, rol: str = 'admin') -> dict:
         conn.commit()
         row = conn.execute(f"SELECT {COLS} FROM operadores WHERE id=?", (oid,)).fetchone()
         return _publico(dict(row))
+    finally:
+        conn.close()
+
+
+class UltimoSuperadmin(Exception):
+    """La operación dejaría al sistema sin ningún superadmin activo."""
+
+
+def superadmins_activos() -> int:
+    conn = _connection()
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM operadores WHERE rol='superadmin' AND activo=1"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _proteger_ultimo_superadmin(fila: dict, rol_nuevo: str, activo_nuevo: bool):
+    """Impide quedarse sin superadmin activo.
+
+    Sin esto, bajarse el rol a uno mismo o desactivar la única cuenta deja el
+    panel sin quién administre operadores — y con el ADMIN_PASSWORD apagado,
+    sin forma de entrar a arreglarlo salvo metiéndose a la BD por SSH.
+    """
+    era_super_activo = fila['rol'] == 'superadmin' and bool(fila['activo'])
+    sigue_super_activo = rol_nuevo == 'superadmin' and activo_nuevo
+    if era_super_activo and not sigue_super_activo and superadmins_activos() <= 1:
+        raise UltimoSuperadmin(
+            "Es el único superadmin activo. Crea o activa otro antes de cambiarle el rol, "
+            "desactivarlo o borrarlo."
+        )
+
+
+def actualizar(operador_id: str, nombre: Optional[str] = None,
+               rol: Optional[str] = None, activo: Optional[bool] = None) -> dict:
+    """Cambia nombre, rol y/o estado. El email y la contraseña van por otro lado:
+    el email es la credencial (se cambia creando otra cuenta) y la contraseña
+    tiene su propia función."""
+    fila = obtener(operador_id)
+    if fila is None:
+        raise LookupError(f"No existe el operador '{operador_id}'.")
+
+    rol_nuevo = fila['rol'] if rol is None else rol
+    if rol_nuevo not in ROLES:
+        raise ValueError(f"rol inválido: {rol!r}. Válidos: {', '.join(ROLES)}.")
+    activo_nuevo = bool(fila['activo']) if activo is None else bool(activo)
+    nombre_nuevo = fila['nombre'] if nombre is None else (nombre or "").strip()
+    if not nombre_nuevo:
+        raise ValueError("nombre no puede estar vacío.")
+
+    _proteger_ultimo_superadmin(fila, rol_nuevo, activo_nuevo)
+
+    conn = _connection()
+    try:
+        conn.execute(
+            "UPDATE operadores SET nombre=?, rol=?, activo=?, actualizado_en=? WHERE id=?",
+            (nombre_nuevo, rol_nuevo, 1 if activo_nuevo else 0, _now(), operador_id),
+        )
+        conn.commit()
+        row = conn.execute(f"SELECT {COLS} FROM operadores WHERE id=?", (operador_id,)).fetchone()
+    finally:
+        conn.close()
+
+    # Desactivar debe echar fuera ya, no cuando venza la sesión. El cambio de rol
+    # no necesita nada: cada request relee el operador, así que aplica solo.
+    if not activo_nuevo:
+        cerrar_sesiones_de(operador_id)
+    return _publico(dict(row))
+
+
+def borrar(operador_id: str) -> None:
+    fila = obtener(operador_id)
+    if fila is None:
+        raise LookupError(f"No existe el operador '{operador_id}'.")
+    _proteger_ultimo_superadmin(fila, rol_nuevo='(borrado)', activo_nuevo=False)
+
+    cerrar_sesiones_de(operador_id)
+    conn = _connection()
+    try:
+        conn.execute("DELETE FROM operadores WHERE id=?", (operador_id,))
+        conn.commit()
     finally:
         conn.close()
 
