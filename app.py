@@ -20,6 +20,7 @@ import funciones
 import modelos as registro_modelos
 import usuarios as registro_usuarios
 import hitos as registro_hitos
+import keys_openai
 import chatbot as asistente
 import generacion_aumentada
 
@@ -315,6 +316,10 @@ def init_log_db():
         # el LLM (ver chatbot.chat()).
         ('ms_rag', 'INTEGER'),
         ('ms_llm', 'INTEGER'),
+        # Qué API key de OpenAI respondió: 'principal' o 'respaldo' (ver
+        # keys_openai.py). Es lo que dice a qué cuenta se le cobró la consulta.
+        # NULL = otro proveedor, o la consulta truena antes de llegar al LLM.
+        ('key_openai', 'TEXT'),
     ):
         if col not in existing:
             conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
@@ -557,6 +562,7 @@ init_agentes_db()
 registro_modelos.init_modelos_db()
 registro_usuarios.init_usuarios_db()
 registro_hitos.init_hitos_db()
+keys_openai.init_configuracion_db()
 cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
@@ -778,6 +784,10 @@ class HitoUpdate(BaseModel):
     nombre: Optional[str] = None
     fecha: Optional[str] = None
     notas: Optional[str] = None
+
+class KeysOpenAIUpdate(BaseModel):
+    # 'auto' | 'principal' | 'respaldo' — ver keys_openai.py
+    modo: str
 
 @app.get("/listarContextos",
          tags=["Contextos"])
@@ -1487,6 +1497,7 @@ def chatbot(data: ChatRequest):
     # LLM) — nunca 0, para no leerse como "instantáneo".
     ms_rag = None
     ms_llm = None
+    key_openai = None
     try:
         result = asistente.chat(
             data.pregunta,
@@ -1506,6 +1517,7 @@ def chatbot(data: ChatRequest):
                 tokens_output = result.get("tokens_output")
                 ms_rag = result.get("ms_rag")
                 ms_llm = result.get("ms_llm")
+                key_openai = result.get("key_openai")
         else:
             # Compat: si algún path devolviera string puro, tratarlo como texto.
             text = str(result)
@@ -1537,15 +1549,15 @@ def chatbot(data: ChatRequest):
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre, ms_rag, ms_llm)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre, ms_rag, ms_llm, key_openai)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
              json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
              text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output,
              base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"),
              proveedor_efectivo, costo_usd,
              usuario_id_efectivo, usuario_slug_efectivo, usuario_nombre_efectivo,
-             ms_rag, ms_llm)
+             ms_rag, ms_llm, key_openai)
         )
         conn.commit()
         conn.close()
@@ -1968,6 +1980,22 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
                GROUP BY modelo, proveedor""",
             (desde_str, upper_exclusive, *extra_params),
         ).fetchall()
+
+        # Cuánto se le cobró a cada key de OpenAI (principal/respaldo, ver
+        # keys_openai.py). Las consultas anteriores a la columna key_openai
+        # no se pueden atribuir y quedan fuera de este desglose.
+        key_rows = conn.execute(
+            f"""SELECT key_openai,
+                      COUNT(*) AS consultas,
+                      SUM(costo_usd) AS costo,
+                      SUM(CASE WHEN costo_usd IS NULL THEN 1 ELSE 0 END) AS sin_tarifa
+               FROM chat_logs
+               WHERE fecha >= ? AND fecha < ?
+                 AND key_openai IS NOT NULL{extra_sql}
+               GROUP BY key_openai
+               ORDER BY key_openai ASC""",
+            (desde_str, upper_exclusive, *extra_params),
+        ).fetchall()
     finally:
         conn.close()
 
@@ -2035,6 +2063,16 @@ def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, us
         # de arriba es un piso, no el gasto completo — la UI debería advertirlo.
         "consultas_sin_tarifa": filas_sin_tarifa_total,
         "por_modelo": por_modelo,
+        "por_key": [
+            {
+                "key": r["key_openai"],
+                "consultas": r["consultas"],
+                # None = ninguna consulta de esa key tenía tarifa conocida.
+                "costo_usd_estimado": round(r["costo"], 6) if r["costo"] is not None else None,
+                "consultas_sin_tarifa": int(r["sin_tarifa"] or 0),
+            }
+            for r in key_rows
+        ],
     }
 
     # Documentos: contar BCs de Chroma y sumar archivos vía funciones.listar_documentos.
@@ -2191,7 +2229,8 @@ def listar_registros(
         rows = conn.execute(
             f"""SELECT id, fecha, proyecto_id, proyecto_slug, asistente_slug,
                        pregunta, respuesta, ms, ms_rag, ms_llm, tokens_input, tokens_output,
-                       modelo, proveedor, costo_usd, usuario_slug, usuario_nombre, error
+                       modelo, proveedor, costo_usd, usuario_slug, usuario_nombre, error,
+                       key_openai
                 FROM chat_logs
                 WHERE {where_sql}
                 ORDER BY {orden_sql}
@@ -2224,6 +2263,9 @@ def listar_registros(
             # vigente cuando ocurrió la consulta. null = sin tarifa conocida,
             # la UI debe mostrar "—" y no 0.
             "costo_usd": r["costo_usd"],
+            # 'principal' | 'respaldo' = a qué cuenta de OpenAI se le cobró.
+            # null = otro proveedor, o consulta anterior a que esto se registrara.
+            "key_openai": r["key_openai"],
             # Denormalizado al momento de la consulta (ver /chatbot). null =
             # anónimo: no venía identificado o el slug no matcheó ningún
             # usuario del proyecto.
@@ -2706,6 +2748,36 @@ async def borrar_modelo(nombre: str, _: bool = Depends(require_admin)):
         raise HTTPException(status_code=503, detail=f"No se pudo conectar a Ollama: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al borrar modelo: {e}")
+
+@app.get("/openai/keys",
+         tags=["OpenAI"],
+         description="Estado de las API keys de OpenAI: el modo (auto, principal, respaldo), si cada key está configurada en el .env, su último uso y último error, y las pausas activas. Nunca devuelve el valor de las keys. Requiere token admin.",
+         summary="Estado de las API keys de OpenAI")
+def estado_keys_openai(_: bool = Depends(require_admin)):
+    return keys_openai.estado()
+
+
+@app.put("/openai/keys",
+         tags=["OpenAI"],
+         description="Cambia el modo de las API keys de OpenAI: 'auto' (principal y, si OpenAI la rechaza, respaldo), 'principal' (solo la principal) o 'respaldo' (solo la de respaldo). No deja forzar una key que no esté configurada en el .env. Cambiar el modo borra las pausas activas. Requiere token admin.",
+         summary="Cambiar modo de las API keys de OpenAI")
+def actualizar_keys_openai(body: KeysOpenAIUpdate, _: bool = Depends(require_admin)):
+    modo = (body.modo or "").strip().lower()
+    if modo not in keys_openai.MODOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"modo inválido: '{body.modo}'. Válidos: {', '.join(keys_openai.MODOS)}.",
+        )
+    if modo != 'auto' and not keys_openai.configuradas()[modo]:
+        # Forzar una key que no existe dejaría a todos los asistentes de OpenAI
+        # sin poder responder.
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede forzar la key '{modo}': {keys_openai.variable_de(modo)} no está configurada en el .env del backend.",
+        )
+    keys_openai.guardar_modo(modo)
+    return keys_openai.estado()
+
 
 @app.get("/health",
          tags=["Utilidad"],

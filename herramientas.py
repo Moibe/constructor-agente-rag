@@ -5,6 +5,8 @@ import time
 import logging
 from typing import Optional
 from langchain_chroma import Chroma
+from langchain_core.embeddings import Embeddings
+import keys_openai
 
 # Modelos de OpenAI para embeddings
 OPENAI_EMBEDDING_MODELS = [
@@ -30,16 +32,55 @@ def es_modelo_openai(nombre_modelo: str) -> bool:
     return nombre_modelo in OPENAI_EMBEDDING_MODELS
 
 
+class _EmbeddingsOpenAI(Embeddings):
+    """OpenAIEmbeddings con las mismas keys que el chat (ver keys_openai.py): si
+    la principal no está disponible, el embedding se pide con la de respaldo.
+
+    Cambiar de cuenta no afecta a Chroma: el vector lo define el modelo
+    (text-embedding-3-small, etc.), no la cuenta que lo pidió, así que una BC
+    embebida con una key se consulta igual con la otra.
+    """
+
+    def __init__(self, modelo: str):
+        self.modelo = modelo
+        self._clientes: dict = {}  # etiqueta de la key → OpenAIEmbeddings
+
+    def _con_key(self, operacion):
+        def llamada(etiqueta, api_key):
+            cliente = self._clientes.get(etiqueta)
+            if cliente is None:
+                from langchain_openai import OpenAIEmbeddings
+                cliente = OpenAIEmbeddings(model=self.modelo, api_key=api_key)
+                self._clientes[etiqueta] = cliente
+            return operacion(cliente)
+        resultado, _ = keys_openai.ejecutar(self.modelo, llamada)
+        return resultado
+
+    def embed_documents(self, texts):
+        return self._con_key(lambda cliente: cliente.embed_documents(texts))
+
+    def embed_query(self, text):
+        return self._con_key(lambda cliente: cliente.embed_query(text))
+
+
+# Uno por modelo, reutilizado entre consultas: no guarda nada de la consulta en
+# curso, y así OpenAIEmbeddings no se reconstruye en cada obtenContexto().
+_embeddings_openai: dict = {}
+
+
 def obtener_embedding_function(nombre_modelo: str):
     """
     Factory que devuelve la función de embedding correcta según el proveedor.
-    - Si el modelo es de OpenAI → OpenAIEmbeddings
+    - Si el modelo es de OpenAI → OpenAIEmbeddings (con key principal/respaldo)
     - Si no → OllamaEmbeddings
     """
     if es_modelo_openai(nombre_modelo):
-        from langchain_openai import OpenAIEmbeddings
         logging.info(f"Usando OpenAIEmbeddings para modelo: {nombre_modelo}")
-        return OpenAIEmbeddings(model=nombre_modelo)
+        embeddings = _embeddings_openai.get(nombre_modelo)
+        if embeddings is None:
+            embeddings = _EmbeddingsOpenAI(nombre_modelo)
+            _embeddings_openai[nombre_modelo] = embeddings
+        return embeddings
     else:
         from langchain_ollama import OllamaEmbeddings
         logging.info(f"Usando OllamaEmbeddings para modelo: {nombre_modelo}")

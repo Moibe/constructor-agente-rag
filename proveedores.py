@@ -12,6 +12,7 @@ dice qué instalar en vez de un ImportError críptico al arrancar el server.
 import os
 from typing import Optional
 
+import keys_openai
 import modelos
 
 
@@ -40,7 +41,53 @@ def _requerir_env(proveedor: str, env_var: str):
         )
 
 
-# Caché de clientes ya construidos, keyed por (proveedor, nombre_modelo).
+class _ClienteLLM:
+    """Lo que devuelve crear_llm(): el modelo listo para invocarse.
+
+    En OpenAI la key se elige en cada invocación (principal o respaldo, ver
+    keys_openai.py), y hay un cliente LangChain por key porque la key se fija al
+    construirlo. En los demás proveedores es un passthrough a un solo cliente.
+
+    No guarda nada de la consulta en curso, así que es seguro compartirlo entre
+    requests concurrentes — vive en `_llm_cache`.
+    """
+
+    def __init__(self, proveedor: str, nombre_modelo: str):
+        self.proveedor = proveedor
+        self.nombre_modelo = nombre_modelo
+        self._clientes: dict = {}  # etiqueta de la key (None fuera de OpenAI) → cliente LangChain
+
+    def _cliente(self, etiqueta: Optional[str] = None, api_key: Optional[str] = None):
+        cliente = self._clientes.get(etiqueta)
+        if cliente is None:
+            cliente = _construir(self.proveedor, self.nombre_modelo, api_key)
+            self._clientes[etiqueta] = cliente
+        return cliente
+
+    def preparar(self):
+        """Construye el cliente que se va a usar primero, para que un problema de
+        configuración truene aquí — antes del RAG — con un error accionable."""
+        if self.proveedor != 'openai':
+            self._cliente()
+            return
+        candidatas = keys_openai.candidatas(self.nombre_modelo)
+        if not candidatas:
+            raise ProveedorError(keys_openai.mensaje_sin_keys())
+        self._cliente(*candidatas[0])
+
+    def invocar(self, prompt):
+        """Devuelve (respuesta, key): key es 'principal' o 'respaldo' en OpenAI,
+        None en los demás proveedores."""
+        if self.proveedor != 'openai':
+            return self._cliente().invoke(prompt), None
+        return keys_openai.ejecutar(
+            self.nombre_modelo,
+            lambda etiqueta, api_key: self._cliente(etiqueta, api_key).invoke(prompt),
+        )
+
+
+# Caché de clientes ya construidos, keyed por (proveedor, nombre_modelo); en
+# OpenAI cada entrada guarda adentro un cliente por key (ver _ClienteLLM).
 # Medido experimentalmente (2026-08-19): construir un ChatOllama/ChatOpenAI/etc.
 # cuesta ~300-350ms SIEMPRE, en cada llamada — no es un costo de arranque en
 # frío que se diluye, es el validador de Pydantic de esas clases corriendo cada
@@ -58,10 +105,11 @@ _llm_cache: dict = {}
 
 
 def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
-    """Devuelve el cliente LangChain que corresponde al modelo (cacheado).
+    """Devuelve el modelo listo para invocarse con `.invocar(prompt)` (cacheado).
 
     Levanta ProveedorError si el modelo no está en el registro, está desactivado,
-    el proveedor es desconocido, o falta el paquete del proveedor.
+    el proveedor es desconocido, falta el paquete del proveedor, o (en OpenAI)
+    no hay ninguna key utilizable con el modo elegido en el admin.
     """
     fila = modelos.obtener(nombre_modelo)
     if fila is None:
@@ -77,22 +125,22 @@ def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
 
     proveedor = fila['proveedor']
     cache_key = (proveedor, nombre_modelo)
-    cliente_cacheado = _llm_cache.get(cache_key)
-    if cliente_cacheado is not None:
-        return cliente_cacheado
+    cliente = _llm_cache.get(cache_key)
+    if cliente is None:
+        cliente = _ClienteLLM(proveedor, nombre_modelo)
+        _llm_cache[cache_key] = cliente
 
     try:
-        cliente = _construir(proveedor, nombre_modelo)
-        _llm_cache[cache_key] = cliente
+        cliente.preparar()
         return cliente
     except ProveedorError:
         raise
     except Exception as e:
-        # Típicamente la API key faltante (OpenAI y Google la validan al
-        # construirse; Anthropic la valida arriba en _construir() vía
-        # _requerir_env). El error de LangChain no menciona ni el modelo ni el
-        # proveedor, así que lo envolvemos con ese contexto para que el mensaje
-        # que llega al admin diga qué configurar.
+        # Típicamente la API key faltante (Google la valida al construirse;
+        # Anthropic la valida abajo en _construir() vía _requerir_env; la de
+        # OpenAI la resuelve keys_openai). El error de LangChain no menciona ni
+        # el modelo ni el proveedor, así que lo envolvemos con ese contexto para
+        # que el mensaje que llega al admin diga qué configurar.
         raise ProveedorError(
             f"No se pudo inicializar el modelo '{nombre_modelo}' (proveedor "
             f"'{proveedor}'). Revisa que la API key del proveedor esté "
@@ -100,13 +148,16 @@ def crear_llm(nombre_modelo: str, temperatura: Optional[float] = None):
         )
 
 
-def _construir(proveedor: str, nombre_modelo: str):
+def _construir(proveedor: str, nombre_modelo: str, api_key: Optional[str] = None):
     if proveedor == 'openai':
         try:
             from langchain_openai import ChatOpenAI
         except ImportError as e:
             raise _paquete_faltante(proveedor, 'langchain-openai', e)
-        return ChatOpenAI(model=nombre_modelo)
+        # La key llega explícita desde keys_openai (principal o respaldo). Sin
+        # ella, ChatOpenAI caería solo a OPENAI_API_KEY.
+        kwargs = {'api_key': api_key} if api_key else {}
+        return ChatOpenAI(model=nombre_modelo, **kwargs)
 
     if proveedor == 'ollama':
         # ChatOllama, no OllamaLLM. OllamaLLM es la clase de *completions*: devuelve

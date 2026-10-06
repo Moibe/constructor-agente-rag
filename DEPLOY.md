@@ -99,6 +99,9 @@ DOCS_FOLDER=./data/documentos
 OLLAMA_HABILITADO=false
 TEXT_EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_API_KEY=sk-...
+# Opcional: otra cuenta de OpenAI para cuando la principal no esté disponible.
+# Se administra desde Administración → API keys.
+OPENAI_API_KEY_RESPALDO=
 
 # --- HTTP ---
 # Con nginx sirviendo los fronts y proxeando /api, el navegador nunca hace una

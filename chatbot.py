@@ -87,8 +87,11 @@ def _extract_tokens(response):
 def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None, top_k: int = 1):
     """Devuelve dict:
     - éxito: {"text": str, "tokens_input": int|None, "tokens_output": int|None,
-              "ms_rag": int|None, "ms_llm": int|None}
+              "ms_rag": int|None, "ms_llm": int|None, "key_openai": str|None}
     - error: {"error_message": str}
+
+    `key_openai` dice qué key de OpenAI respondió ('principal' o 'respaldo',
+    ver keys_openai.py); None si el modelo es de otro proveedor.
 
     `ms_rag`/`ms_llm` desglosan la latencia total (que ya mide app.py alrededor
     de esta función completa) en sus dos partes caras: la búsqueda en Chroma y
@@ -158,7 +161,7 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
 
     # Genera la respuesta
     llm_start = time.perf_counter()
-    response = llm.invoke(full_prompt)
+    response, key_openai = llm.invocar(full_prompt)
     ms_llm = int((time.perf_counter() - llm_start) * 1000)
 
     # Uniformar respuesta a string plano:
@@ -175,4 +178,5 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
         "tokens_output": tokens_output,
         "ms_rag": ms_rag,
         "ms_llm": ms_llm,
+        "key_openai": key_openai,
     }
