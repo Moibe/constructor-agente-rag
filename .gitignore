@@ -8,4 +8,10 @@ hooks.json
 debug_mide.log*
 logs.db*
 agentes.db*
+# Este repo es PÚBLICO: cualquier .env que se cuele queda expuesto para siempre,
+# aunque después se borre el archivo. Por eso se ignora cualquier variante
+# (.env.local, .env.respaldo, .env.bak...) y no sólo `.env` exacto.
+# La única excepción es la plantilla, que va sin valores a propósito.
 .env
+.env.*
+!.env.example
