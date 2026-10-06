@@ -1,5 +1,19 @@
 # Deploy — segunda instancia en el droplet de DigitalOcean
 
+> ## ⚠️ Documento histórico — no vigente (2026-10-05)
+>
+> **Esta segunda instancia nunca se usó y quedó abandonada.** El único despliegue
+> real de este proyecto es el del servidor de CSI (`172.10.30.15`), y se dispara
+> desde `webhook-central` (`/hooks/despliegue-constructor-agente-rag`), no desde
+> GitHub Actions.
+>
+> El workflow que describía este documento (`.github/workflows/deploy.yml`) se
+> eliminó: llevaba fallando en cada push desde el 2026-09-02 porque sus secrets
+> SSH nunca se cargaron, y generaba una notificación de error por cada push a
+> `dev`. Sigue en el historial de git si algún día hace falta revivirlo.
+>
+> Lo de abajo se conserva solo como referencia de cómo estaba pensada.
+
 > Este proyecto ya corre en el servidor de CSI. Este documento describe cómo
 > levantar una **segunda instancia independiente** en el droplet `gradioFish`
 > (`165.22.53.200`), sin copiar el repo y sin tocar la instancia de CSI.
