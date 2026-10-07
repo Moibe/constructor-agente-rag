@@ -897,7 +897,7 @@ def listar_contextos(proyecto_id: Optional[str] = None):
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id: str, chunk_size: Optional[int] = None):
+async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id: str, chunk_size: Optional[int] = None, identidad: dict = Depends(require_admin)):
     """
     Crea una BC vacía y la registra en `bases_conocimiento` asociada al
     `proyecto_id` indicado. Si `proyecto_id` no existe → 400.
@@ -992,6 +992,8 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id
         finally:
             conn.close()
 
+        registro_auditoria.registrar(identidad, 'crear', 'base_conocimiento', nombre_contexto,
+                                     f"Creó la base de conocimiento '{nombre_contexto}' ({embedding_model})")
         return resultado
     except HTTPException:
         raise
@@ -1001,7 +1003,7 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id
 
 @app.delete("/borrarContexto",
             tags=["Contextos"])
-def borrar_contexto(contexto: str, force: bool = False):
+def borrar_contexto(contexto: str, force: bool = False, identidad: dict = Depends(require_admin)):
     """
     Borra una colección de ChromaDB por su nombre.
 
@@ -1050,6 +1052,8 @@ def borrar_contexto(contexto: str, force: bool = False):
 
         funciones.delete_contexto(contexto)
 
+        registro_auditoria.registrar(identidad, 'borrar', 'base_conocimiento', contexto,
+                                     f"Borró la base de conocimiento '{contexto}'")
         return {"Mensaje": f"Contexto '{contexto}' borrada exitosamente."}
     except HTTPException:
         raise
@@ -1168,7 +1172,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
           tags=["Documentos"],
           description="Añade un snippet de TEXTO PLANO a una BC sin necesidad de subir un PDF. Útil para incorporar una Q&A puntual o una nota corta. El `filename` actúa como identidad del snippet (igual que el filename de un PDF en /integrarDocumento); /listarDocumentos, /quitarDocumento, /obtenerDocumento y /historialDocumentos lo tratan idéntico. Si ya existe un documento con ese filename en el contexto, lo reemplaza.",
           summary="Agregar Snippet de Texto")
-def agregar_snippet(contexto: str, body: SnippetRequest):
+def agregar_snippet(contexto: str, body: SnippetRequest, identidad: dict = Depends(require_admin)):
     _validate_doc_path_part(contexto, "contexto")
     _validate_doc_path_part(body.filename, "filename")
 
@@ -1213,6 +1217,8 @@ def agregar_snippet(contexto: str, body: SnippetRequest):
     except Exception as persist_err:
         logger.warning(f"[SNIPPET] No se pudo persistir snippet en disco: {persist_err}")
 
+    registro_auditoria.registrar(identidad, 'crear', 'documento', body.filename,
+                                 f"Agregó el texto '{body.filename}' a la base '{contexto}'")
     return {"mensaje": resultado['message']}
 
 
@@ -1680,7 +1686,7 @@ def listar_agentes(proyecto_id: Optional[str] = None):
           status_code=201,
           description="Crea un agente. Requiere proyecto_id; el contexto referenciado debe ser una BC del mismo proyecto.",
           summary="Crear Agente")
-def crear_agente(body: AgenteCreate):
+def crear_agente(body: AgenteCreate, identidad: dict = Depends(require_admin)):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     instrucciones = _validate_no_empty(body.instrucciones, "instrucciones")
@@ -1725,6 +1731,8 @@ def crear_agente(body: AgenteCreate):
             f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
             (aid,),
         ).fetchone()
+        registro_auditoria.registrar(identidad, 'crear', 'agente', aid,
+                                     f"Creó el asistente '{nombre}' ({slug})")
         return dict(row)
     finally:
         conn.close()
@@ -1751,7 +1759,7 @@ def obtener_agente(aid: str):
                tags=["Agentes"],
                description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen (partial update, semántica PATCH/PUT). Si cambias proyecto_id o contexto, se valida la consistencia BC↔proyecto.",
                summary="Actualizar Agente")
-def actualizar_agente(aid: str, body: AgenteUpdate):
+def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(require_admin)):
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
     if body.slug is not None:
@@ -1869,6 +1877,9 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
             f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
             (aid,),
         ).fetchone()
+        registro_auditoria.registrar(identidad, 'actualizar', 'agente', aid,
+                                     f"Editó el asistente '{nombre}' ({actual['slug']})",
+                                     detalle={"campos": sorted(body.model_fields_set)})
         return dict(row)
     finally:
         conn.close()
@@ -1940,13 +1951,17 @@ def borrar_icono_agente(aid: str, identidad: dict = Depends(require_admin)):
             status_code=204,
             description="Elimina un agente por su ID.",
             summary="Borrar Agente")
-def borrar_agente(aid: str):
+def borrar_agente(aid: str, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
+        previo = conn.execute("SELECT slug, nombre FROM agentes WHERE id=?", (aid,)).fetchone()
         cur = conn.execute("DELETE FROM agentes WHERE id=?", (aid,))
         conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
+        registro_auditoria.registrar(identidad, 'borrar', 'agente', aid,
+                                     f"Borró el asistente '{previo['nombre']}' ({previo['slug']})" if previo
+                                     else f"Borró el asistente {aid}")
     finally:
         conn.close()
 
@@ -1954,7 +1969,7 @@ def borrar_agente(aid: str):
           tags=["Logs"],
           description="Registra un log de conversación en la base de datos SQLite.",
           summary="Registrar Log")
-def registrar_log(data: LogRequest):
+def registrar_log(data: LogRequest, _: dict = Depends(require_admin)):
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(

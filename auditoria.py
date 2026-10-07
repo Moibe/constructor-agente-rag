@@ -14,10 +14,11 @@ Es **append-only**: no hay update ni delete. Una bitácora que se puede editar n
 sirve para lo que existe.
 
 Límites conocidos, para no leerla como si fuera completa:
-- Sólo registra lo que pasa por un endpoint protegido. Crear o borrar asistentes
-  y bases de conocimiento hoy es público (sin credencial), así que esas acciones
-  NO aparecen aquí — no porque nadie las haya hecho, sino porque el servidor no
-  sabe quién fue.
+- Sólo registra lo que pasa por un endpoint protegido. Subir y quitar documentos
+  (`/integrarDocumento`, `/quitarDocumento`) siguen siendo públicos porque el
+  widget ContextLight los usa sin login, así que esas dos acciones NO aparecen
+  aquí — no porque nadie las haga, sino porque el servidor no sabe quién fue.
+  Se cierran cuando el widget tenga su propia credencial por proyecto.
 - Con el `ADMIN_PASSWORD` legacy queda `credencial='legacy'` y sin email: se sabe
   que alguien con el token compartido lo hizo, no quién.
 
@@ -42,7 +43,8 @@ COLS = ("id, fecha, operador_id, operador_email, operador_nombre, credencial, "
 # rechazar un renglón por un verbo nuevo), sino la lista que el front usa para
 # armar su filtro.
 ACCIONES = ('crear', 'actualizar', 'borrar', 'password', 'sincronizar')
-ENTIDADES = ('proyecto', 'agente', 'operador', 'usuario', 'modelo', 'hito', 'api_keys')
+ENTIDADES = ('proyecto', 'agente', 'base_conocimiento', 'documento', 'operador',
+             'usuario', 'modelo', 'hito', 'api_keys')
 
 
 def _now() -> str:
