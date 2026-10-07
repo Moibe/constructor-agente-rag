@@ -23,6 +23,7 @@ import usuarios as registro_usuarios
 import hitos as registro_hitos
 import keys_openai
 import operadores as registro_operadores
+import auditoria as registro_auditoria
 import chatbot as asistente
 import generacion_aumentada
 
@@ -614,6 +615,7 @@ keys_openai.init_configuracion_db()
 registro_operadores.init_operadores_db()
 registro_operadores.sembrar_superadmin()
 registro_operadores.limpiar_sesiones_vencidas()
+registro_auditoria.init_auditoria_db()
 cleanup_legacy_agentes_in_logs_db()
 
 app = FastAPI(
@@ -1360,7 +1362,7 @@ def listar_proyectos():
           status_code=201,
           description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes. Requiere token admin.",
           summary="Crear Proyecto")
-def crear_proyecto(body: ProyectoCreate, _: bool = Depends(require_admin)):
+def crear_proyecto(body: ProyectoCreate, identidad: dict = Depends(require_admin)):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     descripcion = _validate_descripcion(body.descripcion)
@@ -1383,6 +1385,8 @@ def crear_proyecto(body: ProyectoCreate, _: bool = Depends(require_admin)):
             f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
             (pid,),
         ).fetchone()
+        registro_auditoria.registrar(identidad, 'crear', 'proyecto', pid,
+                                     f"Creó el proyecto '{nombre}' ({slug})")
         return _proyecto_to_response(dict(row))
     finally:
         conn.close()
@@ -1408,7 +1412,7 @@ def obtener_proyecto(pid: str):
          tags=["Proyectos"],
          description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables. Requiere token admin.",
          summary="Actualizar Proyecto")
-def actualizar_proyecto(pid: str, body: ProyectoUpdate, _: bool = Depends(require_admin)):
+def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depends(require_admin)):
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
     if body.slug is not None:
@@ -1445,6 +1449,11 @@ def actualizar_proyecto(pid: str, body: ProyectoUpdate, _: bool = Depends(requir
             f"SELECT {_PROYECTO_COLS} FROM proyectos WHERE id=?",
             (pid,),
         ).fetchone()
+        # Qué campos se tocaron, no sus valores: el password jamás debe acabar
+        # en una bitácora, ni siquiera parcialmente.
+        registro_auditoria.registrar(identidad, 'actualizar', 'proyecto', pid,
+                                     f"Editó el proyecto '{actual['nombre']}' ({actual['slug']})",
+                                     detalle={"campos": sorted(body.model_fields_set)})
         return _proyecto_to_response(dict(row))
     finally:
         conn.close()
@@ -1454,12 +1463,13 @@ def actualizar_proyecto(pid: str, body: ProyectoUpdate, _: bool = Depends(requir
             status_code=204,
             description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados. Requiere token admin.",
             summary="Borrar Proyecto")
-def borrar_proyecto(pid: str, _: bool = Depends(require_admin)):
+def borrar_proyecto(pid: str, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
-        row = conn.execute("SELECT id FROM proyectos WHERE id=?", (pid,)).fetchone()
+        row = conn.execute("SELECT id, slug, nombre FROM proyectos WHERE id=?", (pid,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
+        borrado = dict(row)
 
         n_agentes = conn.execute(
             "SELECT COUNT(*) FROM agentes WHERE proyecto_id=?", (pid,)
@@ -1479,6 +1489,8 @@ def borrar_proyecto(pid: str, _: bool = Depends(require_admin)):
 
         conn.execute("DELETE FROM proyectos WHERE id=?", (pid,))
         conn.commit()
+        registro_auditoria.registrar(identidad, 'borrar', 'proyecto', pid,
+                                     f"Borró el proyecto '{borrado['nombre']}' ({borrado['slug']})")
     finally:
         conn.close()
 
@@ -1865,7 +1877,7 @@ def actualizar_agente(aid: str, body: AgenteUpdate):
           tags=["Agentes"],
           description="Sube el ícono custom del avatar del widget. Se guarda como data URI en la fila del agente (no en disco) para que viaje junto al resto de la config y no dependa de rutas estáticas. Máximo 64KB; formatos: png, jpg, webp, gif, svg. Requiere token admin.",
           summary="Subir Ícono de Agente")
-async def subir_icono_agente(aid: str, icono: UploadFile = File(...), _: bool = Depends(require_admin)):
+async def subir_icono_agente(aid: str, icono: UploadFile = File(...), identidad: dict = Depends(require_admin)):
     mime = (icono.content_type or '').split(';')[0].strip().lower()
     if mime not in ICONO_MIME_PERMITIDOS:
         raise HTTPException(
@@ -1894,6 +1906,8 @@ async def subir_icono_agente(aid: str, icono: UploadFile = File(...), _: bool = 
         )
         conn.commit()
         row = conn.execute(f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?", (aid,)).fetchone()
+        registro_auditoria.registrar(identidad, 'actualizar', 'agente', aid,
+                                     f"Subió el ícono del asistente '{dict(row).get('nombre')}'")
         return dict(row)
     finally:
         conn.close()
@@ -1903,7 +1917,7 @@ async def subir_icono_agente(aid: str, icono: UploadFile = File(...), _: bool = 
             tags=["Agentes"],
             description="Quita el ícono custom del agente; el widget vuelve a usar su ícono por defecto. Requiere token admin.",
             summary="Quitar Ícono de Agente")
-def borrar_icono_agente(aid: str, _: bool = Depends(require_admin)):
+def borrar_icono_agente(aid: str, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
         if not conn.execute("SELECT id FROM agentes WHERE id=?", (aid,)).fetchone():
@@ -1914,6 +1928,8 @@ def borrar_icono_agente(aid: str, _: bool = Depends(require_admin)):
         )
         conn.commit()
         row = conn.execute(f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?", (aid,)).fetchone()
+        registro_auditoria.registrar(identidad, 'actualizar', 'agente', aid,
+                                     f"Quitó el ícono del asistente '{dict(row).get('nombre')}'")
         return dict(row)
     finally:
         conn.close()
@@ -2412,7 +2428,7 @@ def listar_registro_modelos(solo_activos: bool = False):
           status_code=201,
           description="Registra un modelo nuevo con su proveedor y tarifas. Requiere token admin.",
           summary="Crear Modelo en el Registro")
-def crear_modelo(body: ModeloCreate, _: bool = Depends(require_admin)):
+def crear_modelo(body: ModeloCreate, identidad: dict = Depends(require_admin)):
     nombre = _validate_nombre_modelo(body.nombre)
     proveedor = _validate_proveedor(body.proveedor)
     p_in = _validate_precio(body.precio_input_usd_1m, "precio_input_usd_1m")
@@ -2430,6 +2446,8 @@ def crear_modelo(body: ModeloCreate, _: bool = Depends(require_admin)):
         row = conn.execute(
             f"SELECT {registro_modelos.COLS} FROM modelos WHERE nombre=?", (nombre,)
         ).fetchone()
+        registro_auditoria.registrar(identidad, 'crear', 'modelo', nombre,
+                                     f"Registró el modelo '{nombre}' ({proveedor})")
         return _modelo_to_response(dict(row))
     finally:
         conn.close()
@@ -2439,7 +2457,7 @@ def crear_modelo(body: ModeloCreate, _: bool = Depends(require_admin)):
          tags=["Modelos"],
          description="Actualiza proveedor, tarifas, estado o notas de un modelo. El nombre es inmutable (es la clave con la que se tarifaron los logs históricos). Requiere token admin.",
          summary="Actualizar Modelo del Registro")
-def actualizar_modelo(nombre: str, body: ModeloUpdate, _: bool = Depends(require_admin)):
+def actualizar_modelo(nombre: str, body: ModeloUpdate, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
         row = conn.execute(
@@ -2476,6 +2494,9 @@ def actualizar_modelo(nombre: str, body: ModeloUpdate, _: bool = Depends(require
         row = conn.execute(
             f"SELECT {registro_modelos.COLS} FROM modelos WHERE nombre=?", (nombre,)
         ).fetchone()
+        registro_auditoria.registrar(identidad, 'actualizar', 'modelo', nombre,
+                                     f"Editó el modelo '{nombre}'",
+                                     detalle={"campos": sorted(body.model_fields_set)})
         return _modelo_to_response(dict(row))
     finally:
         conn.close()
@@ -2486,7 +2507,7 @@ def actualizar_modelo(nombre: str, body: ModeloUpdate, _: bool = Depends(require
             status_code=204,
             description="Elimina un modelo del registro. Bloquea con 409 si algún agente lo tiene asignado — en ese caso desactívalo (PUT activo=false) en vez de borrarlo. Requiere token admin.",
             summary="Borrar Modelo del Registro")
-def borrar_modelo_registro(nombre: str, _: bool = Depends(require_admin)):
+def borrar_modelo_registro(nombre: str, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
         if not conn.execute("SELECT nombre FROM modelos WHERE nombre=?", (nombre,)).fetchone():
@@ -2503,6 +2524,8 @@ def borrar_modelo_registro(nombre: str, _: bool = Depends(require_admin)):
 
         conn.execute("DELETE FROM modelos WHERE nombre=?", (nombre,))
         conn.commit()
+        registro_auditoria.registrar(identidad, 'borrar', 'modelo', nombre,
+                                     f"Quitó el modelo '{nombre}' del registro")
         return None
     finally:
         conn.close()
@@ -2512,7 +2535,7 @@ def borrar_modelo_registro(nombre: str, _: bool = Depends(require_admin)):
           tags=["Modelos"],
           description="Da de alta en el registro los modelos de Ollama instalados que aún no estén registrados, con tarifa 0.00 (hardware propio). No pisa filas existentes: los precios y el estado que hayas editado se respetan. Requiere token admin.",
           summary="Sincronizar Registro con Ollama")
-async def sincronizar_modelos_ollama(_: bool = Depends(require_admin)):
+async def sincronizar_modelos_ollama(identidad: dict = Depends(require_admin)):
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     try:
         async with httpx.AsyncClient() as client:
@@ -2545,6 +2568,9 @@ async def sincronizar_modelos_ollama(_: bool = Depends(require_admin)):
     finally:
         conn.close()
 
+    registro_auditoria.registrar(identidad, 'sincronizar', 'modelo', None,
+                                 f"Sincronizó modelos desde Ollama: {len(nuevos)} nuevo(s)",
+                                 detalle={"agregados": nuevos} if nuevos else None)
     return {
         "instalados_en_ollama": instalados,
         "agregados": nuevos,
@@ -2579,7 +2605,7 @@ def listar_registro_usuarios(proyecto_id: Optional[str] = None, solo_activos: bo
           status_code=201,
           description="Registra un usuario final nuevo dentro de un proyecto. El slug es único por proyecto (no globalmente) y es lo que va en la URL `?usuario=<slug>` del widget. Requiere token admin.",
           summary="Crear Usuario")
-def crear_usuario(body: UsuarioCreate, _: bool = Depends(require_admin)):
+def crear_usuario(body: UsuarioCreate, identidad: dict = Depends(require_admin)):
     _validate_proyecto_existe(body.proyecto_id)
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
@@ -2598,6 +2624,8 @@ def crear_usuario(body: UsuarioCreate, _: bool = Depends(require_admin)):
         )
         conn.commit()
         row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (uid,)).fetchone()
+        registro_auditoria.registrar(identidad, 'crear', 'usuario', uid,
+                                     f"Creó el usuario final '{nombre}' ({slug})")
         return _usuario_to_response(dict(row))
     finally:
         conn.close()
@@ -2607,7 +2635,7 @@ def crear_usuario(body: UsuarioCreate, _: bool = Depends(require_admin)):
          tags=["Usuarios"],
          description="Actualiza nombre, estado o notas de un usuario. El proyecto y el slug son inmutables (el slug ya viaja en URLs entregadas y en chat_logs históricos); para renombrar el slug, crear uno nuevo y desactivar este. Requiere token admin.",
          summary="Actualizar Usuario")
-def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, _: bool = Depends(require_admin)):
+def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
         row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
@@ -2625,6 +2653,9 @@ def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, _: bool = Depends(r
         )
         conn.commit()
         row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
+        registro_auditoria.registrar(identidad, 'actualizar', 'usuario', usuario_id,
+                                     f"Editó el usuario final '{actual['nombre']}' ({actual['slug']})",
+                                     detalle={"campos": sorted(body.model_fields_set)})
         return _usuario_to_response(dict(row))
     finally:
         conn.close()
@@ -2635,13 +2666,16 @@ def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, _: bool = Depends(r
             status_code=204,
             description="Elimina un usuario del registro. A diferencia de /modelos, esto NUNCA se bloquea por uso: el nombre ya quedó denormalizado en cada chat_log al momento de la consulta, así que borrar el usuario no corrompe el histórico. Requiere token admin.",
             summary="Borrar Usuario")
-def borrar_usuario(usuario_id: str, _: bool = Depends(require_admin)):
+def borrar_usuario(usuario_id: str, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
-        if not conn.execute("SELECT id FROM usuarios WHERE id=?", (usuario_id,)).fetchone():
+        fila = conn.execute("SELECT slug, nombre FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
+        if not fila:
             raise HTTPException(status_code=404, detail=f"Usuario '{usuario_id}' no encontrado.")
         conn.execute("DELETE FROM usuarios WHERE id=?", (usuario_id,))
         conn.commit()
+        registro_auditoria.registrar(identidad, 'borrar', 'usuario', usuario_id,
+                                     f"Borró el usuario final '{fila['nombre']}' ({fila['slug']})")
         return None
     finally:
         conn.close()
@@ -2672,7 +2706,7 @@ def listar_hitos(_: bool = Depends(require_admin)):
           status_code=201,
           description="Crea un hito. Si no se manda `fecha`, se usa el momento de creación — pero normalmente conviene mandar la fecha real en que el cambio entró en vigor (ej. la fecha del commit/deploy). Requiere token admin.",
           summary="Crear Hito")
-def crear_hito(body: HitoCreate, _: bool = Depends(require_admin)):
+def crear_hito(body: HitoCreate, identidad: dict = Depends(require_admin)):
     nombre = _validate_nombre(body.nombre)
     fecha = _validate_fecha_iso(body.fecha) or _now()
 
@@ -2686,6 +2720,7 @@ def crear_hito(body: HitoCreate, _: bool = Depends(require_admin)):
         )
         conn.commit()
         row = conn.execute(f"SELECT {registro_hitos.COLS} FROM hitos WHERE id=?", (hid,)).fetchone()
+        registro_auditoria.registrar(identidad, 'crear', 'hito', hid, f"Creó el hito '{nombre}'")
         return dict(row)
     finally:
         conn.close()
@@ -2695,7 +2730,7 @@ def crear_hito(body: HitoCreate, _: bool = Depends(require_admin)):
          tags=["Hitos"],
          description="Actualiza nombre, fecha o notas de un hito. Requiere token admin.",
          summary="Actualizar Hito")
-def actualizar_hito(hito_id: str, body: HitoUpdate, _: bool = Depends(require_admin)):
+def actualizar_hito(hito_id: str, body: HitoUpdate, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
         row = conn.execute(f"SELECT {registro_hitos.COLS} FROM hitos WHERE id=?", (hito_id,)).fetchone()
@@ -2713,6 +2748,9 @@ def actualizar_hito(hito_id: str, body: HitoUpdate, _: bool = Depends(require_ad
         )
         conn.commit()
         row = conn.execute(f"SELECT {registro_hitos.COLS} FROM hitos WHERE id=?", (hito_id,)).fetchone()
+        registro_auditoria.registrar(identidad, 'actualizar', 'hito', hito_id,
+                                     f"Editó el hito '{actual['nombre']}'",
+                                     detalle={"campos": sorted(body.model_fields_set)})
         return dict(row)
     finally:
         conn.close()
@@ -2723,13 +2761,16 @@ def actualizar_hito(hito_id: str, body: HitoUpdate, _: bool = Depends(require_ad
             status_code=204,
             description="Elimina un hito. Requiere token admin.",
             summary="Borrar Hito")
-def borrar_hito(hito_id: str, _: bool = Depends(require_admin)):
+def borrar_hito(hito_id: str, identidad: dict = Depends(require_admin)):
     conn = _agentes_connection()
     try:
-        if not conn.execute("SELECT id FROM hitos WHERE id=?", (hito_id,)).fetchone():
+        fila = conn.execute("SELECT nombre FROM hitos WHERE id=?", (hito_id,)).fetchone()
+        if not fila:
             raise HTTPException(status_code=404, detail=f"Hito '{hito_id}' no encontrado.")
         conn.execute("DELETE FROM hitos WHERE id=?", (hito_id,))
         conn.commit()
+        registro_auditoria.registrar(identidad, 'borrar', 'hito', hito_id,
+                                     f"Borró el hito '{fila['nombre']}'")
         return None
     finally:
         conn.close()
@@ -2802,7 +2843,7 @@ async def info_modelo(modelo: str):
             tags=["Modelos"],
             description="Borra un modelo de Ollama vía su API nativa (DELETE /api/delete). No filtra nombres ni bloquea si hay asistentes usándolo: el admin confirma en el frontend. Requiere token admin.",
             summary="Borrar Modelo")
-async def borrar_modelo(nombre: str, _: bool = Depends(require_admin)):
+async def borrar_modelo(nombre: str, identidad: dict = Depends(require_admin)):
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     try:
         # Timeout más holgado que listar/info: el delete remueve archivos de disco
@@ -2814,6 +2855,8 @@ async def borrar_modelo(nombre: str, _: bool = Depends(require_admin)):
             if response.status_code == 404:
                 raise HTTPException(status_code=404, detail=f"Modelo '{nombre}' no encontrado en Ollama.")
             response.raise_for_status()
+            registro_auditoria.registrar(identidad, 'borrar', 'modelo', nombre,
+                                         f"Borró el modelo '{nombre}' del servidor de Ollama")
             return {"Mensaje": f"Modelo '{nombre}' borrado."}
     except HTTPException:
         raise
@@ -2834,7 +2877,7 @@ def estado_keys_openai(_: bool = Depends(require_admin)):
          tags=["OpenAI"],
          description="Cambia el modo de las API keys de OpenAI: 'auto' (principal y, si OpenAI la rechaza, respaldo), 'principal' (solo la principal) o 'respaldo' (solo la de respaldo). No deja forzar una key que no esté configurada en el .env. Cambiar el modo borra las pausas activas. Requiere token admin.",
          summary="Cambiar modo de las API keys de OpenAI")
-def actualizar_keys_openai(body: KeysOpenAIUpdate, _: bool = Depends(require_admin)):
+def actualizar_keys_openai(body: KeysOpenAIUpdate, identidad: dict = Depends(require_admin)):
     modo = (body.modo or "").strip().lower()
     if modo not in keys_openai.MODOS:
         raise HTTPException(
@@ -2849,6 +2892,8 @@ def actualizar_keys_openai(body: KeysOpenAIUpdate, _: bool = Depends(require_adm
             detail=f"No se puede forzar la key '{modo}': {keys_openai.variable_de(modo)} no está configurada en el .env del backend.",
         )
     keys_openai.guardar_modo(modo)
+    registro_auditoria.registrar(identidad, 'actualizar', 'api_keys', None,
+                                 f"Cambió el modo de las API keys de OpenAI a '{modo}'")
     return keys_openai.estado()
 
 
@@ -2903,10 +2948,13 @@ def listar_operadores(_: dict = Depends(require_superadmin)):
           status_code=201,
           description="Da de alta un operador con su contraseña inicial. El email es único (sin importar mayúsculas) y es la credencial de entrada. Requiere rol superadmin.",
           summary="Crear Operador")
-def crear_operador(body: OperadorCreate, _: dict = Depends(require_superadmin)):
+def crear_operador(body: OperadorCreate, identidad: dict = Depends(require_superadmin)):
     rol = _validar_rol_asignable(body.rol)
     try:
-        return registro_operadores.crear(body.email, body.nombre, body.password, rol=rol)
+        creado = registro_operadores.crear(body.email, body.nombre, body.password, rol=rol)
+        registro_auditoria.registrar(identidad, 'crear', 'operador', creado["id"],
+                                     f"Dio de alta al operador {creado['email']} con rol {rol}")
+        return creado
     except registro_operadores.EmailDuplicado as e:
         raise HTTPException(status_code=409, detail=str(e))
     except registro_operadores.PasswordInvalida as e:
@@ -2924,7 +2972,12 @@ def actualizar_operador(operador_id: str, body: OperadorUpdate, identidad: dict 
         _no_contra_si_mismo(identidad, operador_id, "cambiarle el rol ni desactivar")
     rol = None if body.rol is None else _validar_rol_asignable(body.rol)
     try:
-        return registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol, activo=body.activo)
+        actualizado = registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol, activo=body.activo)
+        registro_auditoria.registrar(identidad, 'actualizar', 'operador', operador_id,
+                                     f"Editó al operador {actualizado['email']}",
+                                     detalle={"campos": sorted(body.model_fields_set),
+                                              "rol": actualizado["rol"], "activo": actualizado["activo"]})
+        return actualizado
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except registro_operadores.UltimoSuperadmin as e:
@@ -2937,13 +2990,16 @@ def actualizar_operador(operador_id: str, body: OperadorUpdate, identidad: dict 
           tags=["Operadores"],
           description="Le pone una contraseña nueva a un operador que la perdió, sin pedir la anterior. Cierra todas sus sesiones. Para cambiar la propia con la contraseña vigente está /auth/cambiar-password. Requiere rol superadmin.",
           summary="Restablecer contraseña de un Operador")
-def resetear_password_operador(operador_id: str, body: OperadorPasswordReset, _: dict = Depends(require_superadmin)):
-    if registro_operadores.obtener(operador_id) is None:
+def resetear_password_operador(operador_id: str, body: OperadorPasswordReset, identidad: dict = Depends(require_superadmin)):
+    objetivo = registro_operadores.obtener(operador_id)
+    if objetivo is None:
         raise HTTPException(status_code=404, detail=f"No existe el operador '{operador_id}'.")
     try:
         registro_operadores.cambiar_password(operador_id, body.password_nueva)
     except registro_operadores.PasswordInvalida as e:
         raise HTTPException(status_code=400, detail=str(e))
+    registro_auditoria.registrar(identidad, 'password', 'operador', operador_id,
+                                 f"Restableció la contraseña de {objetivo['email']}")
     return {"ok": True}
 
 
@@ -2954,13 +3010,52 @@ def resetear_password_operador(operador_id: str, body: OperadorPasswordReset, _:
             summary="Borrar Operador")
 def borrar_operador(operador_id: str, identidad: dict = Depends(require_superadmin)):
     _no_contra_si_mismo(identidad, operador_id, "borrar")
+    objetivo = registro_operadores.obtener(operador_id)
     try:
         registro_operadores.borrar(operador_id)
+        registro_auditoria.registrar(identidad, 'borrar', 'operador', operador_id,
+                                     f"Borró al operador {objetivo['email'] if objetivo else operador_id}")
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except registro_operadores.UltimoSuperadmin as e:
         raise HTTPException(status_code=409, detail=str(e))
     return None
+
+
+@app.get("/auditoria",
+         tags=["Auditoría"],
+         description="Bitácora de administración: quién hizo qué y cuándo. Append-only, no se puede editar ni borrar. Filtros por rango de fechas, operador (email), entidad y acción. Requiere rol superadmin.",
+         summary="Listar Bitácora")
+def listar_auditoria(
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+    operador: Optional[str] = None,
+    entidad: Optional[str] = None,
+    accion: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    _: dict = Depends(require_superadmin),
+):
+    from datetime import date, timedelta
+
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit debe estar entre 1 y 200.")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset debe ser >= 0.")
+    try:
+        desde_date = date.fromisoformat(desde) if desde else None
+        hasta_date = date.fromisoformat(hasta) if hasta else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="desde/hasta deben tener formato YYYY-MM-DD.")
+    if desde_date and hasta_date and desde_date > hasta_date:
+        raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta.")
+
+    return registro_auditoria.listar(
+        desde=desde_date.isoformat() if desde_date else None,
+        # Rango inclusivo: [desde 00:00, hasta+1 día 00:00), igual que /registros.
+        hasta_exclusivo=(hasta_date + timedelta(days=1)).isoformat() if hasta_date else None,
+        operador=operador, entidad=entidad, accion=accion, limit=limit, offset=offset,
+    )
 
 
 @app.get("/health",
@@ -3039,6 +3134,8 @@ def auth_cambiar_password(body: CambiarPasswordRequest, identidad: dict = Depend
         raise HTTPException(status_code=400, detail=str(e))
     # Se cerraron todas las sesiones, incluida la de quien pidió el cambio:
     # devolvemos una nueva para no echarlo del panel por cambiar su contraseña.
+    registro_auditoria.registrar(identidad, 'password', 'operador', identidad["id"],
+                                 "Cambió su propia contraseña")
     sesion = registro_operadores.crear_sesion(identidad["id"])
     return {"ok": True, "token": sesion["token"], "expira_en": sesion["expira_en"]}
 
