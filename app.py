@@ -554,6 +554,14 @@ def init_bases_conocimiento_db():
         FOREIGN KEY (proyecto_id) REFERENCES proyectos(id) ON DELETE RESTRICT
     )''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_bc_proyecto ON bases_conocimiento(proyecto_id)')
+    # Etiqueta legible que el admin le pone a la BC ("Pólizas de autos").
+    # NO es el identificador: `nombre_chroma` sigue siendo la clave y lo que
+    # referencian Chroma, los asistentes y la carpeta de documentos en disco.
+    # Se puede cambiar cuantas veces se quiera sin romper nada.
+    # NULL = nunca se le puso nombre; la UI muestra el identificador.
+    existentes = {row[1] for row in conn.execute("PRAGMA table_info(bases_conocimiento)").fetchall()}
+    if 'nombre_visible' not in existentes:
+        conn.execute('ALTER TABLE bases_conocimiento ADD COLUMN nombre_visible TEXT')
     conn.commit()
     conn.close()
 
@@ -665,6 +673,10 @@ class ChatRequest(BaseModel):
     # proyecto del agente, la consulta se loguea como anónima — nunca se
     # rechaza el chat por esto.
     usuario_slug: Optional[str] = None
+
+class ContextoRenombrar(BaseModel):
+    # None o "" borra la etiqueta y deja ver el identificador.
+    nombre_visible: Optional[str] = None
 
 class SnippetRequest(BaseModel):
     filename: str
@@ -879,14 +891,17 @@ def listar_contextos(proyecto_id: Optional[str] = None):
         conn = _agentes_connection()
         try:
             bc_rows = conn.execute(
-                "SELECT nombre_chroma, proyecto_id FROM bases_conocimiento"
+                "SELECT nombre_chroma, proyecto_id, nombre_visible FROM bases_conocimiento"
             ).fetchall()
-            mapping = {r["nombre_chroma"]: r["proyecto_id"] for r in bc_rows}
+            mapping = {r["nombre_chroma"]: (r["proyecto_id"], r["nombre_visible"]) for r in bc_rows}
         finally:
             conn.close()
 
         for nombre, datos in resultado.items():
-            datos["proyecto_id"] = mapping.get(nombre)
+            proy, visible = mapping.get(nombre, (None, None))
+            datos["proyecto_id"] = proy
+            # null = sin etiqueta; la UI cae al identificador.
+            datos["nombre_visible"] = visible
 
         if proyecto_id:
             resultado = {n: d for n, d in resultado.items() if d.get("proyecto_id") == proyecto_id}
@@ -1166,6 +1181,47 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
             os.remove(file_path)
     else:
         return {"mensaje": f"No existe el contexto {contexto} al que quieres integrar el documento."}
+
+
+@app.put("/renombrarContexto",
+         tags=["Contextos"],
+         description="Le pone a una base de conocimiento un nombre legible para mostrar en el panel (ej. 'Pólizas de autos'). NO cambia su identificador: `nombre_chroma` sigue siendo el mismo en Chroma, en los asistentes que la usan y en la carpeta de documentos, así que renombrar nunca rompe una referencia. Mandar null o vacío quita la etiqueta y vuelve a mostrarse el identificador. Requiere token admin.",
+         summary="Renombrar Base de Conocimiento")
+def renombrar_contexto(contexto: str, body: ContextoRenombrar, identidad: dict = Depends(require_admin)):
+    nombre = (body.nombre_visible or "").strip()
+    if len(nombre) > 120:
+        raise HTTPException(status_code=400, detail="El nombre no puede pasar de 120 caracteres.")
+
+    conn = _agentes_connection()
+    try:
+        fila = conn.execute(
+            "SELECT nombre_chroma, nombre_visible FROM bases_conocimiento WHERE nombre_chroma=?",
+            (contexto,),
+        ).fetchone()
+        if not fila:
+            # Las BCs huérfanas (creadas antes del registro) no están en la tabla:
+            # decirlo así en vez de un 404 pelón, que haría pensar que no existe.
+            raise HTTPException(
+                status_code=404,
+                detail=f"La base de conocimiento '{contexto}' no está registrada en ningún proyecto, "
+                       "así que no se le puede poner nombre.",
+            )
+        previo = fila["nombre_visible"]
+        conn.execute(
+            "UPDATE bases_conocimiento SET nombre_visible=? WHERE nombre_chroma=?",
+            (nombre or None, contexto),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if nombre:
+        resumen = f"Renombró la base de conocimiento '{contexto}' a '{nombre}'"
+    else:
+        resumen = f"Le quitó el nombre a la base de conocimiento '{contexto}'"
+    registro_auditoria.registrar(identidad, 'actualizar', 'base_conocimiento', contexto, resumen,
+                                 detalle={"antes": previo, "ahora": nombre or None})
+    return {"nombre_chroma": contexto, "nombre_visible": nombre or None}
 
 
 @app.post("/agregarSnippet",
