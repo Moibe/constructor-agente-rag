@@ -1105,7 +1105,7 @@ def listar_documentos(contexto: str):
 
 @app.post("/integrarDocumento",
           tags=["Documentos"],
-          description="Carga, divide, vectoriza e integra el documento al contexto elegido.",
+          description="Carga, divide, vectoriza e integra el documento al contexto elegido. Formatos aceptados: PDF (con OCR), Word .docx, .txt y .md; cualquier otro se rechaza con 400. Si el contenido ya estaba en la base (mismo hash) no se vuelve a integrar y la respuesta trae `duplicado: true`.",
           summary="Integrar Documento"
           )
 async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
@@ -1114,6 +1114,16 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
     """
     if documento.filename == '':
         raise HTTPException(status_code=400, detail="No se ha seleccionado un archivo")
+
+    # Validar el formato ANTES de escribir nada: así un archivo que no sabemos
+    # leer da un 400 claro en vez de un 500 del lector a medio proceso.
+    if not generacion_aumentada.allowed_file(documento.filename):
+        extension = generacion_aumentada.extension_de(documento.filename) or 'sin extensión'
+        aceptados = ', '.join(sorted(generacion_aumentada.EXTENSIONES_SOPORTADAS))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato no soportado: '{extension}'. Se aceptan: {aceptados}.",
+        )
 
     # Guardar el archivo temporalmente para procesarlo
     file_path = os.path.join(TEMP_FOLDER, documento.filename)

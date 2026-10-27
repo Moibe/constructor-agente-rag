@@ -14,6 +14,11 @@ unstructured_inference
 pdf2image
 unstructured_pytesseract
 
+# Ingesta de Word .docx: unstructured sabe partirlo pero delega la lectura del
+# archivo en python-docx, que no llega por transitividad. Sin esto, subir un
+# .docx truena con ModuleNotFoundError: docx (ver generacion_aumentada.py).
+python-docx
+
 chromadb
 langchain-ollama
 langchain-openai

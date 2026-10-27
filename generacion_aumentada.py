@@ -9,9 +9,19 @@ import chromadb
 TEMP_FOLDER = os.getenv('TEMP_FOLDER', './_temp')
 CHROMA_PATH = os.getenv('CHROMA_PATH', 'chroma')
 
-# Function to check if the uploaded file is allowed (only PDF files)
+# Formatos que la ingesta sabe leer. Cada uno tiene su lector en
+# _cargar_documentos(); agregar uno nuevo es agregarlo aquí y allá.
+EXTENSIONES_SOPORTADAS = {'.pdf', '.docx', '.txt', '.md'}
+
+
+def extension_de(filename: str) -> str:
+    """Extensión en minúsculas, con punto ('.pdf'); '' si no tiene."""
+    return os.path.splitext(filename or '')[1].lower()
+
+
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'pdf'}
+    """True si la ingesta sabe leer ese formato (ver EXTENSIONES_SOPORTADAS)."""
+    return extension_de(filename) in EXTENSIONES_SOPORTADAS
 
 # Function to save the uploaded file to the temporary folder
 def save_file(file):
@@ -23,17 +33,99 @@ def save_file(file):
 
     return file_path
 
-# Function to load and split the data from the PDF file
+def _leer_texto_plano(file_path):
+    """Lee un .txt/.md probando codificaciones; latin-1 nunca falla, así que
+    cierra la lista y evita que un acento mal guardado tumbe la ingesta."""
+    for encoding in ('utf-8', 'utf-8-sig', 'latin-1'):
+        try:
+            with open(file_path, encoding=encoding) as archivo:
+                return archivo.read()
+        except UnicodeDecodeError:
+            continue
+    return ''
+
+
+def _leer_docx(file_path):
+    """Saca el texto de un .docx: párrafos y tablas, en el orden en que están.
+
+    No lee encabezados, pies de página ni cuadros de texto flotantes; si algún
+    día hacen falta, hay que recorrer también section.header/footer.
+    """
+    import docx
+
+    documento = docx.Document(file_path)
+    partes = [parrafo.text.strip() for parrafo in documento.paragraphs if parrafo.text.strip()]
+
+    for tabla in documento.tables:
+        for fila in tabla.rows:
+            # Una celda combinada aparece repetida en la fila: se filtra por
+            # identidad del elemento XML para no duplicar su texto.
+            vistas, celdas = set(), []
+            for celda in fila.cells:
+                if id(celda._tc) in vistas:
+                    continue
+                vistas.add(id(celda._tc))
+                if celda.text.strip():
+                    celdas.append(celda.text.strip())
+            if celdas:
+                partes.append(' | '.join(celdas))
+
+    return '\n'.join(partes)
+
+
+def _cargar_documentos(file_path):
+    """Devuelve los Document del archivo, eligiendo lector por extensión.
+
+    Todos los lectores dejan el mismo metadato 'source' (ver load_and_split_data),
+    así que listar_documentos y borrar_documento tratan igual a cualquier formato.
+    """
+    extension = extension_de(file_path)
+
+    if extension == '.pdf':
+        # languages=["spa","eng"] activa OCR: necesita tesseract y poppler en el
+        # sistema (ver DEPLOY del server).
+        print("[*] Lector: UnstructuredPDFLoader (PDF, con OCR)", flush=True)
+        return UnstructuredPDFLoader(file_path=file_path, languages=["spa", "eng"]).load()
+
+    if extension == '.docx':
+        # Se lee con python-docx directo, NO con UnstructuredWordDocumentLoader:
+        # ese lector revienta con segfault (exit 139) al partir un .docx en este
+        # entorno. python-docx es puro Python y saca lo mismo que necesitamos.
+        # Extrae párrafos y tablas; lo que esté dentro de imágenes incrustadas
+        # no, porque aquí no corre OCR.
+        from langchain_core.documents import Document
+        print("[*] Lector: python-docx (Word .docx)", flush=True)
+        return [Document(page_content=_leer_docx(file_path), metadata={'source': file_path})]
+
+    if extension in ('.txt', '.md'):
+        # Texto directo, sin lector externo: mismo camino que embed_text().
+        from langchain_core.documents import Document
+        print(f"[*] Lector: texto plano ({extension})", flush=True)
+        contenido = _leer_texto_plano(file_path)
+        return [Document(page_content=contenido, metadata={'source': file_path})]
+
+    # No debería llegar aquí: app.py valida la extensión antes de guardar el
+    # archivo. Queda como red por si alguien llama embed() directo.
+    raise ValueError(
+        f"Formato no soportado: '{extension or 'sin extensión'}'. "
+        f"Se aceptan: {', '.join(sorted(EXTENSIONES_SOPORTADAS))}."
+    )
+
+
 def load_and_split_data(file_path, chunk_size=7500, chunk_overlap=100):
-    
+    """Carga un documento (PDF, Word, txt o md) y lo parte en chunks."""
+
     print("Cargando documento...")
-    print("Subdividiendo documento...")
-    
-    # Load the PDF file and split the data into chunks
-    loader = UnstructuredPDFLoader(file_path=file_path, languages=["spa", "eng"])
-    print("UnstructuredPDFLoader listo.")
-    data = loader.load() #Aquí es donde me pide especificar idioma.
+    data = _cargar_documentos(file_path)
     print("Carga de documento completada.")
+
+    # El borrado busca por coincidencia EXACTA de 'source' (ver
+    # funciones.borrar_documento), así que se fija aquí para los cuatro
+    # formatos en vez de confiar en lo que ponga cada lector.
+    for documento in data:
+        documento.metadata['source'] = file_path
+
+    print("Subdividiendo documento...")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     print(f"Divisor (splitter) cargado con chunk_size={chunk_size}, overlap={chunk_overlap}.")
     chunks = text_splitter.split_documents(data)
