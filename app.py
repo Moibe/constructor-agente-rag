@@ -1144,7 +1144,12 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
         # 2. Verificar si el contenido ya fue subido
         if herramientas.is_content_duplicate(contexto, current_hash):
             print(f"[AVISO] El archivo {file_path} ya existe en la coleccion. Saltando.", flush=True)
-            return {"mensaje": "Éste documento ya había sido integrado previamente."}
+            # Este return queda fuera del try/finally de abajo: borrar aquí el temporal.
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            return {"mensaje": "Éste documento ya había sido integrado previamente.", "duplicado": True}
 
         try:
             print(f"[...] Llamando a generacion_aumentada.embed()...", flush=True)
