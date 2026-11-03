@@ -1420,6 +1420,30 @@ def borrar_documento(data: DeleteRequest):
 _AGENTE_COLS = "id, slug, nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id, creado_en, actualizado_en, color_primario, color_burbuja_bot, color_fondo_chat, color_header, color_avatar, color_boton_enviar, color_texto_header, color_icono, color_icono_boton, icono_url, mensaje_inicial, top_k"
 _PROYECTO_COLS = "id, slug, nombre, descripcion, creado_en, actualizado_en, password"
 
+
+def _con_nombre_visible_bc(conn, agentes):
+    """Agrega `contexto_nombre_visible` a cada agente: la etiqueta legible de su
+    BC (ver /renombrarContexto), o None si no tiene etiqueta o no usa RAG.
+
+    Es lo que pintan los widgets embebidos debajo del nombre del asistente, para
+    no mostrarle al usuario final el identificador crudo ('ad-seguros-2').
+    Se resuelve con UNA consulta para toda la lista, no una por agente.
+    """
+    contextos = {a.get('contexto') for a in agentes if a.get('contexto')}
+    etiquetas = {}
+    if contextos:
+        marcas = ','.join('?' * len(contextos))
+        filas = conn.execute(
+            f"SELECT nombre_chroma, nombre_visible FROM bases_conocimiento "
+            f"WHERE nombre_chroma IN ({marcas})",
+            tuple(contextos),
+        ).fetchall()
+        etiquetas = {f['nombre_chroma']: f['nombre_visible'] for f in filas if f['nombre_visible']}
+
+    for agente in agentes:
+        agente['contexto_nombre_visible'] = etiquetas.get(agente.get('contexto'))
+    return agentes
+
 @app.get("/proyectos",
          tags=["Proyectos"],
          description="Lista todos los proyectos, ordenados por fecha de creación descendente.",
@@ -1748,7 +1772,7 @@ def listar_agentes(proyecto_id: Optional[str] = None):
             rows = conn.execute(
                 f"SELECT {_AGENTE_COLS} FROM agentes ORDER BY creado_en DESC"
             ).fetchall()
-        return [dict(r) for r in rows]
+        return _con_nombre_visible_bc(conn, [dict(r) for r in rows])
     finally:
         conn.close()
 
@@ -1821,7 +1845,7 @@ def obtener_agente(aid: str):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
-        return dict(row)
+        return _con_nombre_visible_bc(conn, [dict(row)])[0]
     finally:
         conn.close()
 
