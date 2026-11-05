@@ -2145,7 +2145,8 @@ class FuenteUpdate(BaseModel):
 
 
 class FuenteSpec(BaseModel):
-    spec: str
+    spec: Optional[str] = None
+    url: Optional[str] = None  # alternativa: el servidor descarga el spec de aquí
 
 
 class FuenteProbar(BaseModel):
@@ -2168,11 +2169,14 @@ def listar_fuentes(proyecto_id: Optional[str] = None, identidad: dict = Depends(
 
 @app.post("/fuentes/analizar",
           tags=["Fuentes de datos"],
-          description="Parsea un spec OpenAPI (JSON o YAML) sin guardar nada y devuelve las operaciones GET que se podrían exponer, con sus parámetros. Requiere admin.",
+          description="Parsea un spec OpenAPI (JSON o YAML) sin guardar nada y devuelve las operaciones GET que se podrían exponer, con sus parámetros. Se manda el texto en `spec` o la dirección en `url` (el servidor lo descarga y lo devuelve en `spec` para guardarlo). Requiere admin.",
           summary="Analizar Spec")
 def analizar_spec_fuente(body: FuenteSpec, identidad: dict = Depends(require_admin)):
     try:
-        return registro_fuentes.analizar_spec(body.spec)
+        if (body.url or '').strip():
+            texto = registro_fuentes.descargar_spec(body.url)
+            return {**registro_fuentes.analizar_spec(texto), 'spec': texto}
+        return registro_fuentes.analizar_spec(body.spec or '')
     except registro_fuentes.FuenteError as e:
         raise _fuente_error(e)
 

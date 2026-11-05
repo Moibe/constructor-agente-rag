@@ -155,6 +155,37 @@ def _cargar_spec(texto: str) -> dict:
     return doc
 
 
+MAX_BYTES_SPEC = 3 * 1024 * 1024
+
+
+def descargar_spec(url: str) -> str:
+    """Trae el spec de una URL (p. ej. el /openapi.json de un FastAPI o un .yml en
+    GitHub). Sólo http(s), 15 s y 3 MB: el admin ya puede pegar cualquier texto,
+    así que esto no abre nada nuevo, pero no hay que convertir al server en proxy."""
+    url = (url or '').strip()
+    if not re.match(r'^https?://', url, re.I):
+        raise FuenteError("La URL del spec debe empezar con http:// o https://.")
+    try:
+        with httpx.Client(timeout=TIMEOUT_SEGUNDOS, follow_redirects=True) as cliente:
+            with cliente.stream('GET', url, headers={'Accept': 'application/json, application/yaml, text/yaml, text/plain;q=0.8, */*;q=0.5'}) as r:
+                if r.status_code != 200:
+                    raise FuenteError(f"La URL del spec respondió {r.status_code}.")
+                partes, total = [], 0
+                for trozo in r.iter_bytes():
+                    total += len(trozo)
+                    if total > MAX_BYTES_SPEC:
+                        raise FuenteError("El spec pesa más de 3 MB; pégalo recortado o pásalo por archivo.")
+                    partes.append(trozo)
+    except httpx.TimeoutException:
+        raise FuenteError(f"La URL del spec no respondió en {TIMEOUT_SEGUNDOS}s.")
+    except httpx.HTTPError as e:
+        raise FuenteError(f"No se pudo descargar el spec: {e}")
+    texto = b''.join(partes).decode('utf-8', errors='replace').strip()
+    if texto.startswith('<'):
+        raise FuenteError("Esa URL devuelve HTML, no un spec: suele ser la página de docs. En FastAPI usa /openapi.json.")
+    return texto
+
+
 def _resolver_ref(doc: dict, obj: Any) -> Any:
     """Sigue `$ref` locales (#/components/... o #/parameters/...), un nivel a la vez."""
     vistos = 0
