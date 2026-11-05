@@ -50,3 +50,9 @@ httpx
 # garantía: una resolución distinta en una instalación limpia lo deja fuera y
 # el login truena al arrancar.
 bcrypt
+
+# Fuentes de datos externas (ver fuentes.py): cifrado de las credenciales con
+# Fernet y specs OpenAPI en YAML. Hoy llegan por transitividad (pdfminer.six,
+# langchain-core), pero el código las importa directo: mismo criterio que bcrypt.
+cryptography
+PyYAML

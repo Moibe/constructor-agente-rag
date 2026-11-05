@@ -84,11 +84,68 @@ def _extract_tokens(response):
     return None, None
 
 
-def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None, top_k: int = 1):
+def _sumar_tokens(acum_in, acum_out, response):
+    ti, to = _extract_tokens(response)
+    if ti is not None:
+        acum_in = (acum_in or 0) + ti
+    if to is not None:
+        acum_out = (acum_out or 0) + to
+    return acum_in, acum_out
+
+
+def _responder_con_herramientas(llm, full_prompt, herramientas: list):
+    """Ciclo de herramientas: el modelo pide una o varias llamadas a APIs, se
+    ejecutan, se le devuelven los resultados y vuelve a pensar, hasta que
+    contesta con texto o se agota el límite de rondas.
+
+    Devuelve (texto, tokens_input, tokens_output, key_openai, rondas). Los tokens
+    son la SUMA de todas las vueltas: cada ronda es una llamada al LLM que se
+    cobra, y el log debe reflejar el costo real de la consulta.
+    """
+    from langchain_core.messages import HumanMessage, ToolMessage
+    import fuentes as registro_fuentes
+
+    por_nombre = {h.name: h for h in herramientas}
+    mensajes = [HumanMessage(content=full_prompt.to_string())]
+    tokens_in = tokens_out = None
+    key_openai = None
+    rondas = 0
+    while True:
+        response, key_openai = llm.invocar(mensajes, herramientas=herramientas)
+        tokens_in, tokens_out = _sumar_tokens(tokens_in, tokens_out, response)
+        llamadas = getattr(response, 'tool_calls', None) or []
+        if not llamadas or rondas >= registro_fuentes.MAX_RONDAS_HERRAMIENTAS:
+            raw = response.content if hasattr(response, 'content') else response
+            texto = _extraer_texto_de_respuesta(raw)
+            if llamadas and not texto:
+                texto = ("No pude terminar de consultar los datos externos en esta vuelta. "
+                         "¿Puedes darme un dato más específico?")
+            return texto, tokens_in, tokens_out, key_openai, rondas
+        rondas += 1
+        mensajes.append(response)
+        for llamada in llamadas:
+            herramienta = por_nombre.get(llamada['name'])
+            if herramienta is None:
+                salida = f"ERROR: la herramienta {llamada['name']!r} no existe."
+            else:
+                try:
+                    salida = herramienta.invoke(llamada.get('args') or {})
+                except Exception as e:  # argumentos inválidos, etc.: el modelo lo ve y corrige
+                    salida = f"ERROR al llamar {llamada['name']}: {e}"
+            mensajes.append(ToolMessage(content=str(salida), tool_call_id=llamada['id']))
+
+
+def chat(user_question: str, history: list = [], contexto: Optional[str] = None, modelo_llm: str = 'phi3', instrucciones: Optional[str] = None, top_k: int = 1, herramientas: Optional[list] = None):
     """Devuelve dict:
     - éxito: {"text": str, "tokens_input": int|None, "tokens_output": int|None,
-              "ms_rag": int|None, "ms_llm": int|None, "key_openai": str|None}
+              "ms_rag": int|None, "ms_llm": int|None, "key_openai": str|None,
+              "rondas_herramientas": int}
     - error: {"error_message": str}
+
+    `herramientas`: tools LangChain de las fuentes de datos externas del agente
+    (ver fuentes.herramientas_para_agente). Vacío/None = el camino de siempre,
+    una sola llamada al LLM sin herramientas; nada cambia para los asistentes
+    que no tienen fuentes.
 
     `key_openai` dice qué key de OpenAI respondió ('principal' o 'respaldo',
     ver keys_openai.py); None si el modelo es de otro proveedor.
@@ -161,17 +218,24 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
 
     # Genera la respuesta
     llm_start = time.perf_counter()
-    response, key_openai = llm.invocar(full_prompt)
+    rondas = 0
+    if herramientas:
+        # `ms_llm` incluye las llamadas a las APIs externas: para quien lee el
+        # reporte, todo eso es "lo que tardó en contestar el modelo".
+        text, tokens_input, tokens_output, key_openai, rondas = _responder_con_herramientas(
+            llm, full_prompt, herramientas
+        )
+    else:
+        response, key_openai = llm.invocar(full_prompt)
+        # Uniformar respuesta a string plano:
+        # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
+        # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
+        # - ChatOllama / ChatAnthropic / ChatGoogleGenerativeAI: content es str
+        #   (Anthropic puede devolver lista de bloques, que el helper también aplana).
+        raw = response.content if hasattr(response, 'content') else response
+        text = _extraer_texto_de_respuesta(raw)
+        tokens_input, tokens_output = _extract_tokens(response)
     ms_llm = int((time.perf_counter() - llm_start) * 1000)
-
-    # Uniformar respuesta a string plano:
-    # - ChatOpenAI (Chat Completions, ej. gpt-4o): response.content es str.
-    # - ChatOpenAI (Responses API, ej. gpt-5): response.content es lista de dicts.
-    # - ChatOllama / ChatAnthropic / ChatGoogleGenerativeAI: content es str
-    #   (Anthropic puede devolver lista de bloques, que el helper también aplana).
-    raw = response.content if hasattr(response, 'content') else response
-    text = _extraer_texto_de_respuesta(raw)
-    tokens_input, tokens_output = _extract_tokens(response)
     return {
         "text": text,
         "tokens_input": tokens_input,
@@ -179,4 +243,5 @@ def chat(user_question: str, history: list = [], contexto: Optional[str] = None,
         "ms_rag": ms_rag,
         "ms_llm": ms_llm,
         "key_openai": key_openai,
+        "rondas_herramientas": rondas,
     }
