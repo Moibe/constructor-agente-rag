@@ -24,6 +24,7 @@ import hitos as registro_hitos
 import keys_openai
 import operadores as registro_operadores
 import auditoria as registro_auditoria
+import fuentes as registro_fuentes
 import chatbot as asistente
 import generacion_aumentada
 
@@ -369,6 +370,10 @@ def init_log_db():
         # keys_openai.py). Es lo que dice a qué cuenta se le cobró la consulta.
         # NULL = otro proveedor, o la consulta truena antes de llegar al LLM.
         ('key_openai', 'TEXT'),
+        # Llamadas a APIs externas (fuentes de datos) hechas durante la consulta:
+        # JSON [{fuente, herramienta, parametros, status, ms, ok, error}]. NULL =
+        # no se llamó ninguna (asistente sin fuentes o el modelo no las necesitó).
+        ('herramientas', 'TEXT'),
     ):
         if col not in existing:
             conn.execute(f'ALTER TABLE chat_logs ADD COLUMN {col} {typ}')
@@ -619,6 +624,7 @@ init_agentes_db()
 registro_modelos.init_modelos_db()
 registro_usuarios.init_usuarios_db()
 registro_hitos.init_hitos_db()
+registro_fuentes.init_fuentes_db()
 keys_openai.init_configuracion_db()
 registro_operadores.init_operadores_db()
 registro_operadores.sembrar_superadmin()
@@ -726,6 +732,10 @@ class AgenteCreate(BaseModel):
     icono_url: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: int = 1
+    # Ids de fuentes de datos externas (ver fuentes.py) que el asistente puede
+    # consultar. Deben ser del mismo proyecto. Con fuentes, el modelo no puede
+    # ser de Ollama.
+    fuentes: list[str] = []
 
 class AgenteUpdate(BaseModel):
     nombre: Optional[str] = None
@@ -746,9 +756,28 @@ class AgenteUpdate(BaseModel):
     icono_url: Optional[str] = None
     mensaje_inicial: Optional[str] = None
     top_k: Optional[int] = None
+    # No enviado = no tocar; enviado (aunque sea []) = reemplazar la lista.
+    fuentes: Optional[list[str]] = None
     # Sentinels para detectar intentos de modificar campos inmutables
     id: Optional[str] = None
     slug: Optional[str] = None
+
+
+def _validate_modelo_con_fuentes(modelo_llm: str, fuente_ids: list):
+    """Un asistente con fuentes de datos externas sólo puede usar proveedores que
+    llaman herramientas de forma confiable (OpenAI, Anthropic, Google). Los
+    modelos locales de Ollama inventan parámetros o no llaman nada."""
+    if not fuente_ids:
+        return
+    fila = registro_modelos.obtener(modelo_llm)
+    proveedor = fila['proveedor'] if fila else None
+    if not registro_fuentes.modelo_permitido(proveedor):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"El modelo '{modelo_llm}' ({proveedor or 'proveedor desconocido'}) no puede usar "
+                    "fuentes de datos externas: elige un modelo de OpenAI, Anthropic o Google, "
+                    "o quita las fuentes del asistente."),
+        )
 
 class Agente(BaseModel):
     id: str
@@ -1684,7 +1713,13 @@ def chatbot(data: ChatRequest):
     ms_rag = None
     ms_llm = None
     key_openai = None
+    # Fuentes de datos externas del agente. `llamadas_api` lo van llenando las
+    # herramientas durante la consulta; se guarda en chat_logs.herramientas.
+    herramientas = []
+    llamadas_api: list = []
     try:
+        if data.agente_id is not None:
+            herramientas, llamadas_api = registro_fuentes.herramientas_para_agente(data.agente_id)
         result = asistente.chat(
             data.pregunta,
             data.historial,
@@ -1692,6 +1727,7 @@ def chatbot(data: ChatRequest):
             modelo_efectivo,
             instrucciones=instrucciones_efectivas,
             top_k=top_k_efectivo,
+            herramientas=herramientas,
         )
         # chat() ahora devuelve dict: éxito con `text`+tokens, o error con `error_message`.
         if isinstance(result, dict):
@@ -1711,7 +1747,8 @@ def chatbot(data: ChatRequest):
         error_str = str(e)
 
     elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
-    print("Respuesta:", text or f"<error: {error_str}>", f"({elapsed_ms} ms, tokens={tokens_input}/{tokens_output})")
+    print("Respuesta:", text or f"<error: {error_str}>", f"({elapsed_ms} ms, tokens={tokens_input}/{tokens_output}, llamadas a APIs={len(llamadas_api)})")
+    herramientas_json = json.dumps(llamadas_api, ensure_ascii=False) if llamadas_api else None
 
     # Persistir el log con tokens y los slugs denormalizados (para que /registros
     # pueda filtrar por proyecto/asistente sin JOIN). No bloqueamos la respuesta
@@ -1735,15 +1772,15 @@ def chatbot(data: ChatRequest):
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
-            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre, ms_rag, ms_llm, key_openai)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO chat_logs (fecha, sesion, ambiente, modelo, contexto, pregunta, historial, respuesta, ms, error, agente_id, tokens_input, tokens_output, proyecto_id, proyecto_slug, asistente_slug, proveedor, costo_usd, usuario_id, usuario_slug, usuario_nombre, ms_rag, ms_llm, key_openai, herramientas)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (_now(), None, None, modelo_efectivo, contexto_efectivo, data.pregunta,
              json.dumps(data.historial, ensure_ascii=False) if data.historial else None,
              text, elapsed_ms, error_str, data.agente_id, tokens_input, tokens_output,
              base.get("proyecto_id"), base.get("proyecto_slug"), base.get("slug"),
              proveedor_efectivo, costo_usd,
              usuario_id_efectivo, usuario_slug_efectivo, usuario_nombre_efectivo,
-             ms_rag, ms_llm, key_openai)
+             ms_rag, ms_llm, key_openai, herramientas_json)
         )
         conn.commit()
         conn.close()
@@ -1772,7 +1809,7 @@ def listar_agentes(proyecto_id: Optional[str] = None):
             rows = conn.execute(
                 f"SELECT {_AGENTE_COLS} FROM agentes ORDER BY creado_en DESC"
             ).fetchall()
-        return _con_nombre_visible_bc(conn, [dict(r) for r in rows])
+        return registro_fuentes.anexar_a_agentes(conn, _con_nombre_visible_bc(conn, [dict(r) for r in rows]))
     finally:
         conn.close()
 
@@ -1813,6 +1850,11 @@ def crear_agente(body: AgenteCreate, identidad: dict = Depends(require_admin)):
         existing = conn.execute("SELECT id FROM agentes WHERE slug=?", (slug,)).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail=f"Ya existe un agente con slug '{slug}'.")
+        try:
+            fuente_ids = registro_fuentes.validar_asignacion(conn, body.proyecto_id, body.fuentes)
+        except registro_fuentes.FuenteError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        _validate_modelo_con_fuentes(modelo_llm, fuente_ids)
 
         conn.execute(
             f"INSERT INTO agentes ({_AGENTE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1821,6 +1863,7 @@ def crear_agente(body: AgenteCreate, identidad: dict = Depends(require_admin)):
              color_avatar, color_boton_enviar, color_texto_header, color_icono,
              color_icono_boton, icono_url, mensaje_inicial, top_k),
         )
+        registro_fuentes.guardar_asignacion(conn, aid, fuente_ids)
         conn.commit()
         row = conn.execute(
             f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
@@ -1828,7 +1871,7 @@ def crear_agente(body: AgenteCreate, identidad: dict = Depends(require_admin)):
         ).fetchone()
         registro_auditoria.registrar(identidad, 'crear', 'agente', aid,
                                      f"Creó el asistente '{nombre}' ({slug})")
-        return dict(row)
+        return registro_fuentes.anexar_a_agentes(conn, [dict(row)])[0]
     finally:
         conn.close()
 
@@ -1845,7 +1888,7 @@ def obtener_agente(aid: str):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
-        return _con_nombre_visible_bc(conn, [dict(row)])[0]
+        return registro_fuentes.anexar_a_agentes(conn, _con_nombre_visible_bc(conn, [dict(row)]))[0]
     finally:
         conn.close()
 
@@ -1960,6 +2003,20 @@ def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(re
         if (contexto_cambio or proyecto_cambio) and contexto is not None:
             _validate_bc_pertenece_a_proyecto(contexto, proyecto_id_efectivo)
 
+        # Fuentes de datos: no enviadas = se conservan; enviadas = se reemplazan.
+        # Se validan contra el proyecto EFECTIVO y el modelo EFECTIVO, así cambiar
+        # sólo el modelo a uno de Ollama también se rechaza si ya había fuentes.
+        if body.fuentes is not None:
+            try:
+                fuente_ids = registro_fuentes.validar_asignacion(conn, proyecto_id_efectivo, body.fuentes)
+            except registro_fuentes.FuenteError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        else:
+            fuente_ids = registro_fuentes.ids_de_agente(conn, aid)
+            if proyecto_cambio and fuente_ids:
+                raise HTTPException(status_code=400, detail="Quita las fuentes de datos del asistente antes de cambiarlo de proyecto.")
+        _validate_modelo_con_fuentes(modelo_llm, fuente_ids)
+
         conn.execute(
             "UPDATE agentes SET nombre=?, instrucciones=?, contexto=?, modelo_llm=?, historial_max=?, proyecto_id=?, color_primario=?, color_burbuja_bot=?, color_fondo_chat=?, color_header=?, color_avatar=?, color_boton_enviar=?, color_texto_header=?, color_icono=?, color_icono_boton=?, icono_url=?, mensaje_inicial=?, top_k=?, actualizado_en=? WHERE id=?",
             (nombre, instrucciones, contexto, modelo_llm, historial_max, proyecto_id_efectivo,
@@ -1967,6 +2024,8 @@ def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(re
              color_avatar, color_boton_enviar, color_texto_header, color_icono,
              color_icono_boton, icono_url, mensaje_inicial, top_k, _now(), aid),
         )
+        if body.fuentes is not None:
+            registro_fuentes.guardar_asignacion(conn, aid, fuente_ids)
         conn.commit()
         row = conn.execute(
             f"SELECT {_AGENTE_COLS} FROM agentes WHERE id=?",
@@ -1975,7 +2034,7 @@ def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(re
         registro_auditoria.registrar(identidad, 'actualizar', 'agente', aid,
                                      f"Editó el asistente '{nombre}' ({actual['slug']})",
                                      detalle={"campos": sorted(body.model_fields_set)})
-        return dict(row)
+        return registro_fuentes.anexar_a_agentes(conn, [dict(row)])[0]
     finally:
         conn.close()
 
@@ -2059,6 +2118,150 @@ def borrar_agente(aid: str, identidad: dict = Depends(require_admin)):
                                      else f"Borró el asistente {aid}")
     finally:
         conn.close()
+
+# ─── Fuentes de datos externas (APIs que un asistente puede consultar) ─────────
+
+class FuenteCreate(BaseModel):
+    proyecto_id: str
+    nombre: str
+    descripcion: Optional[str] = None
+    url_base: Optional[str] = None      # si falta, se toma de `servers` del spec
+    spec: str                           # OpenAPI en JSON o YAML, pegado tal cual
+    operaciones: list[str]              # ids de operaciones GET a exponer
+    auth_tipo: str = 'ninguna'          # ninguna | header | query | basic
+    auth_nombre: Optional[str] = None   # cabecera / parámetro / usuario
+    auth_secreto: Optional[str] = None  # valor de la cabecera, parámetro o contraseña
+
+
+class FuenteUpdate(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    url_base: Optional[str] = None
+    spec: Optional[str] = None
+    operaciones: Optional[list[str]] = None
+    auth_tipo: Optional[str] = None
+    auth_nombre: Optional[str] = None
+    auth_secreto: Optional[str] = None  # no enviado / null = conservar la credencial guardada
+
+
+class FuenteSpec(BaseModel):
+    spec: str
+
+
+class FuenteProbar(BaseModel):
+    operacion: str
+    parametros: dict = {}
+
+
+def _fuente_error(e: registro_fuentes.FuenteError):
+    return HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/fuentes",
+         tags=["Fuentes de datos"],
+         description="Lista las fuentes de datos externas. Acepta ?proyecto_id=... Nunca devuelve credenciales, sólo `auth_configurada`. Requiere admin.",
+         summary="Listar Fuentes")
+def listar_fuentes(proyecto_id: Optional[str] = None, identidad: dict = Depends(require_admin)):
+    return {"clave_configurada": registro_fuentes.clave_configurada(),
+            "fuentes": registro_fuentes.listar(proyecto_id)}
+
+
+@app.post("/fuentes/analizar",
+          tags=["Fuentes de datos"],
+          description="Parsea un spec OpenAPI (JSON o YAML) sin guardar nada y devuelve las operaciones GET que se podrían exponer, con sus parámetros. Requiere admin.",
+          summary="Analizar Spec")
+def analizar_spec_fuente(body: FuenteSpec, identidad: dict = Depends(require_admin)):
+    try:
+        return registro_fuentes.analizar_spec(body.spec)
+    except registro_fuentes.FuenteError as e:
+        raise _fuente_error(e)
+
+
+@app.get("/fuentes/{fid}",
+         tags=["Fuentes de datos"],
+         description="Una fuente con su spec completo (para editarla). Sin credenciales. Requiere admin.",
+         summary="Obtener Fuente")
+def obtener_fuente(fid: str, identidad: dict = Depends(require_admin)):
+    f = registro_fuentes.obtener(fid, con_spec=True)
+    if not f:
+        raise HTTPException(status_code=404, detail=f"Fuente '{fid}' no encontrada.")
+    f["asistentes"] = registro_fuentes.asistentes_que_usan(fid)
+    return f
+
+
+@app.post("/fuentes",
+          tags=["Fuentes de datos"],
+          status_code=201,
+          description="Da de alta una fuente de datos externa en un proyecto. La credencial se guarda cifrada con FUENTES_CLAVE del .env. Requiere admin.",
+          summary="Crear Fuente")
+def crear_fuente(body: FuenteCreate, identidad: dict = Depends(require_admin)):
+    try:
+        f = registro_fuentes.crear(body.proyecto_id, body.nombre, body.descripcion, body.url_base, body.spec,
+                                   body.operaciones, body.auth_tipo, body.auth_nombre, body.auth_secreto)
+    except registro_fuentes.FuenteError as e:
+        raise _fuente_error(e)
+    registro_auditoria.registrar(identidad, 'crear', 'fuente', f['id'],
+                                 f"Dio de alta la fuente de datos '{f['nombre']}' ({len(f['operaciones'])} operaciones)")
+    return f
+
+
+@app.api_route("/fuentes/{fid}",
+               methods=["PUT", "PATCH"],
+               tags=["Fuentes de datos"],
+               description="Edita una fuente. Campos no enviados se conservan; `auth_secreto` no enviado conserva la credencial. Requiere admin.",
+               summary="Actualizar Fuente")
+def actualizar_fuente(fid: str, body: FuenteUpdate, identidad: dict = Depends(require_admin)):
+    cambios = {k: getattr(body, k) for k in body.model_fields_set}
+    try:
+        f = registro_fuentes.actualizar(fid, cambios)
+    except registro_fuentes.FuenteError as e:
+        raise HTTPException(status_code=404 if 'no existe' in str(e) else 400, detail=str(e))
+    registro_auditoria.registrar(identidad, 'actualizar', 'fuente', fid,
+                                 f"Editó la fuente de datos '{f['nombre']}'",
+                                 detalle={"campos": sorted(k for k in cambios if k != 'auth_secreto') + (['auth_secreto'] if cambios.get('auth_secreto') else [])})
+    return f
+
+
+@app.delete("/fuentes/{fid}",
+            tags=["Fuentes de datos"],
+            status_code=204,
+            description="Borra una fuente. Si algún asistente la usa responde 409 con la lista, salvo ?force=true, que la desasigna y borra. Requiere admin.",
+            summary="Borrar Fuente")
+def borrar_fuente(fid: str, force: bool = False, identidad: dict = Depends(require_admin)):
+    usan = registro_fuentes.asistentes_que_usan(fid)
+    if usan and not force:
+        raise HTTPException(status_code=409, detail={
+            "mensaje": f"{len(usan)} asistente(s) usan esta fuente: " + ", ".join(a['nombre'] for a in usan),
+            "asistentes": usan,
+        })
+    try:
+        previo = registro_fuentes.borrar(fid)
+    except registro_fuentes.FuenteError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    registro_auditoria.registrar(identidad, 'borrar', 'fuente', fid, f"Borró la fuente de datos '{previo['nombre']}'")
+
+
+@app.post("/fuentes/{fid}/probar",
+          tags=["Fuentes de datos"],
+          description="Ejecuta una operación GET de la fuente con los parámetros dados, con la credencial guardada, y devuelve status, ms y el cuerpo (truncado). Para comprobar que la fuente está bien configurada. Requiere admin.",
+          summary="Probar Fuente")
+def probar_fuente(fid: str, body: FuenteProbar, identidad: dict = Depends(require_admin)):
+    conn = registro_fuentes._connection()
+    try:
+        fila = registro_fuentes._fila_completa(conn, fid)
+    finally:
+        conn.close()
+    if not fila:
+        raise HTTPException(status_code=404, detail=f"Fuente '{fid}' no encontrada.")
+    ops = {o['id']: o for o in json.loads(fila['operaciones'] or '[]')}
+    op = ops.get(body.operacion)
+    if not op:
+        raise HTTPException(status_code=400, detail=f"La operación '{body.operacion}' no está expuesta en esta fuente.")
+    try:
+        return registro_fuentes.ejecutar(fila, op, body.parametros or {})
+    except registro_fuentes.FuenteError as e:
+        raise _fuente_error(e)
+
 
 @app.post("/registrarLog",
           tags=["Logs"],
@@ -2429,7 +2632,7 @@ def listar_registros(
             f"""SELECT id, fecha, proyecto_id, proyecto_slug, asistente_slug,
                        pregunta, respuesta, ms, ms_rag, ms_llm, tokens_input, tokens_output,
                        modelo, proveedor, costo_usd, usuario_slug, usuario_nombre, error,
-                       key_openai
+                       key_openai, herramientas
                 FROM chat_logs
                 WHERE {where_sql}
                 ORDER BY {orden_sql}
@@ -2471,6 +2674,9 @@ def listar_registros(
             "usuario_slug": r["usuario_slug"],
             "usuario_nombre": r["usuario_nombre"],
             "error": r["error"],
+            # Llamadas a APIs externas durante la consulta (fuentes de datos).
+            # Lista vacía = ninguna.
+            "herramientas": json.loads(r["herramientas"]) if r["herramientas"] else [],
         }
         for r in rows
     ]

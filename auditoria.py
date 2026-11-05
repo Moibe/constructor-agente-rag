@@ -44,7 +44,7 @@ COLS = ("id, fecha, operador_id, operador_email, operador_nombre, credencial, "
 # armar su filtro.
 ACCIONES = ('crear', 'actualizar', 'borrar', 'password', 'sincronizar')
 ENTIDADES = ('proyecto', 'agente', 'base_conocimiento', 'documento', 'operador',
-             'usuario', 'modelo', 'hito', 'api_keys')
+             'usuario', 'modelo', 'hito', 'api_keys', 'fuente')
 
 
 def _now() -> str:

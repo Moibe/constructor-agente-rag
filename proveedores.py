@@ -75,14 +75,22 @@ class _ClienteLLM:
             raise ProveedorError(keys_openai.mensaje_sin_keys())
         self._cliente(*candidatas[0])
 
-    def invocar(self, prompt):
+    def invocar(self, prompt, herramientas: Optional[list] = None):
         """Devuelve (respuesta, key): key es 'principal' o 'respaldo' en OpenAI,
-        None en los demás proveedores."""
+        None en los demás proveedores.
+
+        `herramientas`: tools LangChain de las fuentes de datos externas (ver
+        fuentes.py). Con ellas el modelo puede devolver `tool_calls` en vez de
+        texto; el ciclo de ejecutarlas y volver a preguntar vive en chatbot.py.
+        `bind_tools` devuelve un runnable nuevo y no toca el cliente cacheado."""
+        def _con_tools(cliente):
+            return cliente.bind_tools(herramientas) if herramientas else cliente
+
         if self.proveedor != 'openai':
-            return self._cliente().invoke(prompt), None
+            return _con_tools(self._cliente()).invoke(prompt), None
         return keys_openai.ejecutar(
             self.nombre_modelo,
-            lambda etiqueta, api_key: self._cliente(etiqueta, api_key).invoke(prompt),
+            lambda etiqueta, api_key: _con_tools(self._cliente(etiqueta, api_key)).invoke(prompt),
         )
 
 
