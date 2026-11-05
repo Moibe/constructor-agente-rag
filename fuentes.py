@@ -18,6 +18,7 @@ print(Fernet.generate_key().decode())"`.
 Este módulo NO importa `app.py` — al revés.
 """
 import json
+import math
 import os
 import re
 import sqlite3
@@ -39,6 +40,12 @@ TIMEOUT_SEGUNDOS = 15
 # Vueltas máximas del ciclo "el modelo pide una herramienta → se ejecuta → vuelve
 # a pensar". Protege contra un modelo que se queda llamando APIs en bucle.
 MAX_RONDAS_HERRAMIENTAS = 5
+# Ejemplos y defaults del spec más largos que esto (en JSON) no se guardan: no
+# sirven para prellenar un campo y sólo gastarían tokens en cada consulta.
+MAX_LARGO_EJEMPLO = 300
+# Valores de un enum que se le listan al modelo en la descripción del parámetro
+# (Open-Meteo tiene uno de 355). El formulario de prueba sí los muestra todos.
+MAX_VALORES_ENUM_MODELO = 60
 
 
 class FuenteError(Exception):
@@ -166,15 +173,29 @@ def _resolver_ref(doc: dict, obj: Any) -> Any:
     return obj
 
 
-def _url_base_sugerida(doc: dict) -> str:
-    servers = doc.get('servers')
+def _url_de_servers(servers: Any) -> str:
     if isinstance(servers, list) and servers and isinstance(servers[0], dict):
         return str(servers[0].get('url') or '').rstrip('/')
+    return ''
+
+
+def _url_base_sugerida(doc: dict) -> str:
+    url = _url_de_servers(doc.get('servers'))
+    if url:
+        return url
     # Swagger 2
     host = doc.get('host')
     if host:
         esquema = (doc.get('schemes') or ['https'])[0]
         return f"{esquema}://{host}{doc.get('basePath') or ''}".rstrip('/')
+    # OpenAPI también deja declarar `servers` por ruta o por operación (Open-Meteo
+    # lo hace así): se sugiere el de la primera operación GET que lo traiga.
+    for item in (doc.get('paths') or {}).values():
+        item = _resolver_ref(doc, item)
+        if isinstance(item, dict) and isinstance(item.get('get'), dict):
+            url = _url_de_servers(item['get'].get('servers')) or _url_de_servers(item.get('servers'))
+            if url:
+                return url
     return ''
 
 
@@ -184,6 +205,98 @@ def _nombre_herramienta(operation_id: Optional[str], ruta: str) -> str:
     return (base or 'operacion')[:64]
 
 
+def _esquema_efectivo(doc: dict, esquema: Any) -> dict:
+    """Quita la envoltura de nulabilidad para llegar al tipo real: `anyOf: [{X},
+    {type: null}]` (así declara FastAPI un parámetro Optional), `allOf: [{$ref}]`
+    (enums de Pydantic v1) o `type: [X, 'null']` (OpenAPI 3.1). Lo declarado afuera
+    (default, example, description) gana sobre lo de la variante."""
+    esquema = _resolver_ref(doc, esquema)
+    for _ in range(3):
+        if not isinstance(esquema, dict):
+            return {}
+        variantes = esquema.get('anyOf') or esquema.get('oneOf') or esquema.get('allOf')
+        if 'type' in esquema or not isinstance(variantes, list):
+            break
+        no_nulas = [v for v in (_resolver_ref(doc, x) for x in variantes)
+                    if isinstance(v, dict) and v.get('type') != 'null']
+        if len(no_nulas) != 1:
+            break
+        afuera = {k: v for k, v in esquema.items() if k not in ('anyOf', 'oneOf', 'allOf')}
+        esquema = {**no_nulas[0], **afuera}
+    if not isinstance(esquema, dict):
+        return {}
+    tipo = esquema.get('type')
+    if isinstance(tipo, list):
+        no_nulos = [t for t in tipo if t != 'null']
+        esquema = {**esquema, 'type': no_nulos[0] if no_nulos else 'string'}
+    return esquema
+
+
+def _valor_json(v: Any) -> Any:
+    """Lo que trae el spec, en algo que json.dumps acepte: el YAML vuelve un
+    `2024-01-01` sin comillas un `date`, y `.nan` un float que el JSON rechaza."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return str(v)
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_valor_json(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _valor_json(x) for k, x in v.items()}
+    if hasattr(v, 'isoformat'):
+        return v.isoformat()
+    return str(v)
+
+
+def _valor_corto(v: Any) -> Any:
+    """Ejemplo/default listo para guardar, o None si viene vacío o es enorme."""
+    if v is None:
+        return None
+    v = _valor_json(v)
+    return v if len(json.dumps(v, ensure_ascii=False)) <= MAX_LARGO_EJEMPLO else None
+
+
+def _ejemplo(doc: dict, p: dict, esquema: dict, items: dict) -> Any:
+    """El primer ejemplo que declare el spec. Cada generador lo pone en otro lado:
+    `example` o `examples` (mapa de Example Objects) del parámetro, `example` o
+    `examples` (lista, OpenAPI 3.1; así lo emite FastAPI con Query(examples=[...]))
+    del schema, o `x-example` (Swagger 2)."""
+    if p.get('example') is not None:
+        return p['example']
+    ejemplos = p.get('examples')
+    if isinstance(ejemplos, dict):
+        for e in ejemplos.values():
+            e = _resolver_ref(doc, e)
+            if isinstance(e, dict) and e.get('value') is not None:
+                return e['value']
+    elif isinstance(ejemplos, list) and ejemplos:
+        return ejemplos[0]
+    if esquema.get('example') is not None:
+        return esquema['example']
+    if isinstance(esquema.get('examples'), list) and esquema['examples']:
+        return esquema['examples'][0]
+    if p.get('x-example') is not None:
+        return p['x-example']
+    if items.get('example') is not None:
+        return [items['example']]
+    return None
+
+
+def _separador_lista(p: dict, donde: str) -> Optional[str]:
+    """Cómo viaja un arreglo: None = repitiendo el parámetro (?a=1&a=2); si no, el
+    separador con el que se juntan los valores (?a=1,2)."""
+    if 'schema' not in p:
+        # Swagger 2: collectionFormat, y su valor por omisión es csv.
+        formato = p.get('collectionFormat') or 'csv'
+        return {'ssv': ' ', 'tsv': '\t', 'pipes': '|', 'multi': None}.get(formato, ',')
+    if donde != 'query':
+        return ','  # path y header usan style=simple: siempre con comas
+    estilo = p.get('style') or 'form'
+    if p.get('explode', estilo == 'form'):
+        return None
+    return {'spaceDelimited': ' ', 'pipeDelimited': '|'}.get(estilo, ',')
+
+
 def _parametro(doc: dict, p: Any) -> Optional[dict]:
     p = _resolver_ref(doc, p)
     if not isinstance(p, dict) or 'name' not in p:
@@ -191,20 +304,34 @@ def _parametro(doc: dict, p: Any) -> Optional[dict]:
     donde = p.get('in')
     if donde not in ('path', 'query', 'header'):
         return None
-    esquema = _resolver_ref(doc, p.get('schema') or {})
-    tipo = esquema.get('type') if isinstance(esquema, dict) else None
-    tipo = tipo or p.get('type') or 'string'
-    if tipo not in _TIPOS:
+    esquema = _esquema_efectivo(doc, p.get('schema') or {})
+    tipo = esquema.get('type') or p.get('type') or 'string'
+    if not isinstance(tipo, str):
         tipo = 'string'
-    enum = esquema.get('enum') if isinstance(esquema, dict) else p.get('enum')
-    return {
+    lista = tipo == 'array'
+    items = _esquema_efectivo(doc, esquema.get('items') or p.get('items') or {}) if lista else {}
+    if tipo not in _TIPOS:
+        # Un arreglo se pide (al modelo y en Probar) como texto separado por comas;
+        # `ejecutar` lo parte y lo manda como diga el spec (ver `separador`).
+        tipo = 'string'
+    if lista:
+        enum = items.get('enum')
+    else:
+        enum = esquema.get('enum') if 'enum' in esquema else p.get('enum')
+    d = {
         'nombre': p['name'],
         'en': donde,
         'requerido': bool(p.get('required')) or donde == 'path',
         'tipo': tipo,
         'descripcion': (p.get('description') or '').strip(),
-        'enum': enum if isinstance(enum, list) else None,
+        'enum': _valor_json(enum) if isinstance(enum, list) and enum else None,
+        'ejemplo': _valor_corto(_ejemplo(doc, p, esquema, items)),
+        'default': _valor_corto(esquema['default'] if 'default' in esquema else p.get('default')),
     }
+    if lista:
+        d['lista'] = True
+        d['separador'] = _separador_lista(p, donde)
+    return d
 
 
 def analizar_spec(texto: str) -> dict:
@@ -336,7 +463,7 @@ def crear(proyecto_id: str, nombre: str, descripcion: Optional[str], url_base: O
     ops, sugerida = _validar_operaciones(spec, operaciones)
     url = (url_base or sugerida or '').strip().rstrip('/')
     if not re.match(r'^https?://', url):
-        raise FuenteError("La URL base debe empezar con http:// o https:// (el spec no trae `servers`, cárgala a mano).")
+        raise FuenteError("La URL base debe empezar con http:// o https:// (si el spec no la trae completa, escríbela a mano).")
     tipo, anombre, cifrado = _validar_auth(auth_tipo, auth_nombre, auth_secreto, None)
     conn = _connection()
     try:
@@ -472,6 +599,26 @@ def _credencial(fuente: dict) -> Optional[str]:
     return descifrar(cifrado) if cifrado else None
 
 
+def _texto(v: Any) -> str:
+    """Un valor del spec o del modelo como lo escribiría una URL (true, no True)."""
+    if isinstance(v, bool):
+        return 'true' if v else 'false'
+    if v is None:
+        return ''
+    if isinstance(v, (list, tuple)):
+        return ','.join(_texto(x) for x in v)
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
+
+
+def _elementos_lista(valor: Any) -> list[str]:
+    """Un arreglo llega como lista o como texto separado por comas (así lo mandan
+    el modelo y el formulario de prueba)."""
+    crudos = list(valor) if isinstance(valor, (list, tuple)) else str(valor).split(',')
+    return [t for t in (_texto(x).strip() for x in crudos) if t]
+
+
 def ejecutar(fuente: dict, operacion: dict, argumentos: dict) -> dict:
     """Hace el GET y devuelve {ok, status, url, ms, cuerpo, truncado, error}.
     `fuente` es la fila completa (con el secreto cifrado)."""
@@ -482,10 +629,17 @@ def ejecutar(fuente: dict, operacion: dict, argumentos: dict) -> dict:
     faltan = []
     for p in operacion.get('parametros', []):
         valor = argumentos.get(p['nombre'])
+        if p.get('lista') and valor is not None:
+            valor = _elementos_lista(valor) or None
         if valor is None or valor == '':
             if p['requerido']:
                 faltan.append(p['nombre'])
             continue
+        if p.get('lista'):
+            if p['en'] == 'query' and p.get('separador') is None:
+                params[p['nombre']] = valor  # httpx repite el parámetro por cada valor
+                continue
+            valor = (p.get('separador') or ',').join(valor)
         if p['en'] == 'path':
             ruta = ruta.replace('{' + p['nombre'] + '}', httpx.URL(path='/' + str(valor)).path[1:])
         elif p['en'] == 'query':
@@ -549,14 +703,31 @@ def _texto_para_modelo(resultado: dict) -> str:
 
 # ─── Herramientas LangChain para un asistente ──────────────────────────────
 
+def _descripcion_parametro(p: dict) -> str:
+    """Lo que lee el modelo de cada argumento: la descripción del spec más los
+    valores válidos, un ejemplo y el default, para que mande el formato correcto."""
+    desc = p['descripcion'] or f"Parámetro {p['nombre']} ({p['en']})"
+    if p.get('lista'):
+        desc += " Acepta varios valores separados por comas."
+    if p.get('enum'):
+        valores = [_texto(v) for v in p['enum']]
+        desc += " Valores posibles: " + ', '.join(valores[:MAX_VALORES_ENUM_MODELO])
+        if len(valores) > MAX_VALORES_ENUM_MODELO:
+            desc += f" (y {len(valores) - MAX_VALORES_ENUM_MODELO} más)"
+        desc += "."
+    if p.get('ejemplo') is not None:
+        desc += f" Ejemplo: {_texto(p['ejemplo'])}."
+    if p.get('default') is not None:
+        desc += f" Por defecto: {_texto(p['default'])}."
+    return desc
+
+
 def _esquema_argumentos(nombre: str, parametros: list[dict]):
     from pydantic import Field, create_model
     campos: dict = {}
     for p in parametros:
         tipo = _TIPOS.get(p['tipo'], str)
-        desc = p['descripcion'] or f"Parámetro {p['nombre']} ({p['en']})"
-        if p.get('enum'):
-            desc += " Valores posibles: " + ', '.join(str(v) for v in p['enum']) + "."
+        desc = _descripcion_parametro(p)
         if p['requerido']:
             campos[p['nombre']] = (tipo, Field(..., description=desc))
         else:
