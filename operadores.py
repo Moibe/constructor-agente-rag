@@ -10,15 +10,15 @@ sin identidad (ver `identidad_actual` en app.py). La idea es poder apagarlo
 cuando todos los que entran tengan su cuenta, sin que nadie se quede fuera
 mientras tanto.
 
-Roles previstos (hoy solo se usa 'superadmin'):
+Roles:
 - superadmin → todo, incluido administrar operadores.
 - admin      → opera el sistema, pero no crea ni borra operadores.
-- cliente    → pensado para que vea sólo sus proyectos. El filtrado por proyecto
-               NO está implementado todavía: un 'cliente' hoy pasaría los mismos
-               chequeos que un admin, así que no des de alta cuentas con ese rol
-               hasta que exista. A propósito no hay columna `proyecto_id` acá:
-               cuando toque, la relación va en su propia tabla operador↔proyectos
-               (N:M), porque una persona puede llevar varios proyectos.
+- cliente    → sólo ve y trabaja los proyectos que tiene asignados (tabla
+               `operadores_proyectos`, N:M porque una persona puede llevar
+               varios). Dentro de ellos arma bases de conocimiento, asistentes
+               y usuarios finales; no entra a Administración, ni crea proyectos,
+               ni toca fuentes de datos. El filtrado lo hace app.py
+               (`require_sesion` + `_exigir_proyecto`); `require_admin` lo rechaza.
 
 Sesiones: token opaco guardado **hasheado**. El token en claro sólo existe en la
 respuesta del login y en el navegador — si alguien se roba `agentes.db` no se
@@ -52,11 +52,8 @@ COLS_PUBLICAS = ("id", "email", "nombre", "rol", "activo", "creado_en", "actuali
 
 ROLES = ('superadmin', 'admin', 'cliente')
 
-# Lo que hoy se puede asignar desde el panel. 'cliente' queda fuera a propósito:
-# el filtrado por proyecto NO existe todavía, así que una cuenta con ese rol
-# tendría de hecho los mismos permisos que un admin — justo lo contrario de lo
-# que su nombre promete. Se abre cuando el scoping por proyecto esté hecho.
-ROLES_ASIGNABLES = ('superadmin', 'admin')
+# Lo que se puede asignar desde el panel.
+ROLES_ASIGNABLES = ('superadmin', 'admin', 'cliente')
 
 # bcrypt 5 levanta ValueError arriba de 72 bytes en vez de truncar en silencio,
 # así que el límite se valida antes y el usuario recibe un mensaje claro.
@@ -112,6 +109,14 @@ def init_operadores_db():
             ultimo_uso  TEXT
         )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_sesiones_operador ON sesiones(operador_id)')
+
+        # Proyectos a los que puede entrar un operador con rol 'cliente'. Para
+        # superadmin/admin no se consulta: ven todos.
+        conn.execute('''CREATE TABLE IF NOT EXISTS operadores_proyectos (
+            operador_id TEXT NOT NULL,
+            proyecto_id TEXT NOT NULL,
+            PRIMARY KEY (operador_id, proyecto_id)
+        )''')
         conn.commit()
     finally:
         conn.close()
@@ -160,7 +165,46 @@ def _publico(fila: Optional[dict]) -> Optional[dict]:
         return None
     d = {k: fila[k] for k in COLS_PUBLICAS}
     d["activo"] = bool(d["activo"])
+    # Sólo significa algo para 'cliente'; los demás roles ven todos los proyectos.
+    d["proyectos"] = proyectos_de(d["id"]) if d["rol"] == 'cliente' else []
     return d
+
+
+def resumen(operador_id: str) -> Optional[dict]:
+    """El operador tal como sale a HTTP (sin hash, con sus proyectos)."""
+    return _publico(obtener(operador_id))
+
+
+def proyectos_de(operador_id: str) -> list:
+    """Ids de los proyectos asignados a un operador (los que existen todavía)."""
+    conn = _connection()
+    try:
+        rows = conn.execute(
+            """SELECT op.proyecto_id FROM operadores_proyectos op
+               JOIN proyectos p ON p.id = op.proyecto_id
+               WHERE op.operador_id=? ORDER BY p.nombre""", (operador_id,)).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
+def asignar_proyectos(operador_id: str, proyecto_ids: list) -> list:
+    """Reemplaza la lista de proyectos de un operador. Levanta ValueError si
+    alguno no existe. Aplica al instante: cada request relee los permisos."""
+    ids = list(dict.fromkeys(str(p).strip() for p in (proyecto_ids or []) if str(p).strip()))
+    conn = _connection()
+    try:
+        for pid in ids:
+            if not conn.execute("SELECT 1 FROM proyectos WHERE id=?", (pid,)).fetchone():
+                raise ValueError(f"El proyecto '{pid}' no existe.")
+        conn.execute("DELETE FROM operadores_proyectos WHERE operador_id=?", (operador_id,))
+        conn.executemany(
+            "INSERT INTO operadores_proyectos (operador_id, proyecto_id) VALUES (?, ?)",
+            [(operador_id, pid) for pid in ids])
+        conn.commit()
+    finally:
+        conn.close()
+    return proyectos_de(operador_id)
 
 
 def contar(rol: Optional[str] = None) -> int:
@@ -310,6 +354,7 @@ def borrar(operador_id: str) -> None:
     cerrar_sesiones_de(operador_id)
     conn = _connection()
     try:
+        conn.execute("DELETE FROM operadores_proyectos WHERE operador_id=?", (operador_id,))
         conn.execute("DELETE FROM operadores WHERE id=?", (operador_id,))
         conn.commit()
     finally:
