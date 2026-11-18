@@ -973,6 +973,8 @@ class OperadorCreate(BaseModel):
     proyectos: Optional[list[str]] = None
 
 class OperadorUpdate(BaseModel):
+    # None = no tocar. Cambiarlo cambia con qué se entra; lo demás se conserva.
+    email: Optional[str] = None
     nombre: Optional[str] = None
     rol: Optional[str] = None
     activo: Optional[bool] = None
@@ -3369,24 +3371,41 @@ def crear_operador(body: OperadorCreate, identidad: dict = Depends(require_super
 
 @app.put("/operadores/{operador_id}",
          tags=["Operadores"],
-         description="Cambia nombre, rol o estado de un operador. Desactivarlo cierra sus sesiones al instante. No deja dejar al sistema sin superadmin activo ni modificar la propia cuenta. El email es inmutable: es la credencial y lo que identifica sus sesiones. Requiere rol superadmin.",
+         description="Cambia nombre, rol o estado de un operador. Desactivarlo cierra sus sesiones al instante. No deja dejar al sistema sin superadmin activo ni modificar la propia cuenta. El email se puede cambiar (es con lo que entra; conserva contraseña, rol, proyectos y sesiones) y debe ser único. Requiere rol superadmin.",
          summary="Actualizar Operador")
 def actualizar_operador(operador_id: str, body: OperadorUpdate, identidad: dict = Depends(require_superadmin)):
-    if body.rol is not None or body.activo is not None:
-        _no_contra_si_mismo(identidad, operador_id, "cambiarle el rol ni desactivar")
+    previo = registro_operadores.obtener(operador_id)
+    if previo is None:
+        raise HTTPException(status_code=404, detail=f"No existe el operador '{operador_id}'.")
     rol = None if body.rol is None else _validar_rol_asignable(body.rol)
+    # El guard es contra CAMBIARSE el rol o desactivarse: mandar el mismo valor
+    # que ya se tiene (el formulario del panel siempre manda el rol) no cuenta,
+    # o nadie podría editar su propio nombre o email.
+    cambia_rol = rol is not None and rol != previo["rol"]
+    cambia_activo = body.activo is not None and bool(body.activo) != bool(previo["activo"])
+    if cambia_rol or cambia_activo:
+        _no_contra_si_mismo(identidad, operador_id, "cambiarle el rol ni desactivar")
     for pid in (body.proyectos or []):
         _validate_proyecto_existe(pid)
     try:
-        actualizado = registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol, activo=body.activo)
+        actualizado = registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol,
+                                                     activo=body.activo, email=body.email)
         if body.proyectos is not None:
             registro_operadores.asignar_proyectos(operador_id, body.proyectos)
             actualizado = registro_operadores.resumen(operador_id)
-        registro_auditoria.registrar(identidad, 'actualizar', 'operador', operador_id,
-                                     f"Editó al operador {actualizado['email']}",
-                                     detalle={"campos": sorted(body.model_fields_set),
-                                              "rol": actualizado["rol"], "activo": actualizado["activo"]})
+        cambio_email = actualizado["email"] != previo["email"]
+        detalle = {"campos": sorted(body.model_fields_set),
+                   "rol": actualizado["rol"], "activo": actualizado["activo"]}
+        if cambio_email:
+            detalle["email_anterior"] = previo["email"]
+        registro_auditoria.registrar(
+            identidad, 'actualizar', 'operador', operador_id,
+            (f"Cambió el email del operador {previo['email']} a {actualizado['email']}" if cambio_email
+             else f"Editó al operador {actualizado['email']}"),
+            detalle=detalle)
         return actualizado
+    except registro_operadores.EmailDuplicado as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except registro_operadores.UltimoSuperadmin as e:
@@ -3459,12 +3478,22 @@ def listar_auditoria(
     if desde_date and hasta_date and desde_date > hasta_date:
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta.")
 
-    return registro_auditoria.listar(
+    resultado = registro_auditoria.listar(
         desde=desde_date.isoformat() if desde_date else None,
         # Rango inclusivo: [desde 00:00, hasta+1 día 00:00), igual que /registros.
         hasta_exclusivo=(hasta_date + timedelta(days=1)).isoformat() if hasta_date else None,
         operador=operador, entidad=entidad, accion=accion, limit=limit, offset=offset,
     )
+    # El filtro "Quién" va por cuenta. Si la cuenta sigue existiendo se muestra con
+    # su nombre y email de HOY (pudieron cambiar); si ya la borraron, con los
+    # últimos que dejó en la bitácora.
+    for cuenta in resultado.get("cuentas", []):
+        vigente = registro_operadores.obtener(cuenta["id"])
+        cuenta["existe"] = vigente is not None
+        if vigente:
+            cuenta["email"], cuenta["nombre"] = vigente["email"], vigente["nombre"]
+    resultado.get("cuentas", []).sort(key=lambda c: (c.get("nombre") or c.get("email") or "").lower())
+    return resultado
 
 
 @app.get("/health",

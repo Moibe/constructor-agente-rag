@@ -309,10 +309,13 @@ def _proteger_ultimo_superadmin(fila: dict, rol_nuevo: str, activo_nuevo: bool):
 
 
 def actualizar(operador_id: str, nombre: Optional[str] = None,
-               rol: Optional[str] = None, activo: Optional[bool] = None) -> dict:
-    """Cambia nombre, rol y/o estado. El email y la contraseña van por otro lado:
-    el email es la credencial (se cambia creando otra cuenta) y la contraseña
-    tiene su propia función."""
+               rol: Optional[str] = None, activo: Optional[bool] = None,
+               email: Optional[str] = None) -> dict:
+    """Cambia nombre, rol, estado y/o email. La contraseña tiene su propia función.
+
+    Cambiar el email cambia con qué se entra, y nada más: las sesiones, la
+    contraseña, el rol y los proyectos cuelgan del id de la cuenta, no del email.
+    Levanta EmailDuplicado si otra cuenta ya lo usa."""
     fila = obtener(operador_id)
     if fila is None:
         raise LookupError(f"No existe el operador '{operador_id}'.")
@@ -324,22 +327,32 @@ def actualizar(operador_id: str, nombre: Optional[str] = None,
     nombre_nuevo = fila['nombre'] if nombre is None else (nombre or "").strip()
     if not nombre_nuevo:
         raise ValueError("nombre no puede estar vacío.")
+    email_nuevo = fila['email'] if email is None else normalizar_email(email)
+    if not email_nuevo or '@' not in email_nuevo:
+        raise ValueError("email inválido.")
 
     _proteger_ultimo_superadmin(fila, rol_nuevo, activo_nuevo)
 
     conn = _connection()
     try:
-        conn.execute(
-            "UPDATE operadores SET nombre=?, rol=?, activo=?, actualizado_en=? WHERE id=?",
-            (nombre_nuevo, rol_nuevo, 1 if activo_nuevo else 0, _now(), operador_id),
-        )
+        try:
+            conn.execute(
+                "UPDATE operadores SET email=?, nombre=?, rol=?, activo=?, actualizado_en=? WHERE id=?",
+                (email_nuevo, nombre_nuevo, rol_nuevo, 1 if activo_nuevo else 0, _now(), operador_id),
+            )
+        except sqlite3.IntegrityError:
+            raise EmailDuplicado(f"Ya existe un operador con el email '{email_nuevo}'.")
         conn.commit()
         row = conn.execute(f"SELECT {COLS} FROM operadores WHERE id=?", (operador_id,)).fetchone()
     finally:
         conn.close()
 
+    if email_nuevo != fila['email']:
+        # El freno de intentos fallidos va por email: el viejo ya no es de nadie.
+        _intentos.pop(fila['email'], None)
+
     # Desactivar debe echar fuera ya, no cuando venza la sesión. El cambio de rol
-    # no necesita nada: cada request relee el operador, así que aplica solo.
+    # (o de email) no necesita nada: cada request relee el operador, así que aplica solo.
     if not activo_nuevo:
         cerrar_sesiones_de(operador_id)
     return _publico(dict(row))

@@ -113,7 +113,10 @@ def listar(desde: Optional[str] = None, hasta_exclusivo: Optional[str] = None,
     if hasta_exclusivo:
         where.append("fecha < ?"); params.append(hasta_exclusivo)
     if operador:
-        where.append("operador_email = ?"); params.append(operador)
+        # `operador` es el id de la cuenta (así el filtro junta todo lo que hizo
+        # una persona aunque le hayan cambiado el email). Se sigue aceptando un
+        # email, que es lo que mandaban los paneles anteriores a ese cambio.
+        where.append("(operador_id = ? OR operador_email = ?)"); params.extend([operador, operador])
     if entidad:
         where.append("entidad = ?"); params.append(entidad)
     if accion:
@@ -135,6 +138,17 @@ def listar(desde: Optional[str] = None, hasta_exclusivo: Optional[str] = None,
             r["operador_email"] for r in
             conn.execute("SELECT DISTINCT operador_email FROM auditoria WHERE operador_email IS NOT NULL ORDER BY operador_email").fetchall()
         ]
+        # Una entrada por CUENTA, con el email y el nombre más recientes que se
+        # le vieron aquí (app.py los cambia por los vigentes si la cuenta existe).
+        cuentas, vistas = [], set()
+        for r in conn.execute(
+            """SELECT operador_id, operador_email, operador_nombre FROM auditoria
+               WHERE operador_id IS NOT NULL ORDER BY fecha DESC, id DESC"""
+        ).fetchall():
+            if r["operador_id"] in vistas:
+                continue
+            vistas.add(r["operador_id"])
+            cuentas.append({"id": r["operador_id"], "email": r["operador_email"], "nombre": r["operador_nombre"]})
     finally:
         conn.close()
 
@@ -154,6 +168,7 @@ def listar(desde: Optional[str] = None, hasta_exclusivo: Optional[str] = None,
         "limit": limit,
         "offset": offset,
         "operadores": operadores,
+        "cuentas": cuentas,
         "acciones": list(ACCIONES),
         "entidades": list(ENTIDADES),
     }
