@@ -11,8 +11,9 @@ cuando todos los que entran tengan su cuenta, sin que nadie se quede fuera
 mientras tanto.
 
 Roles:
-- superadmin → todo, incluido administrar operadores.
-- admin      → opera el sistema, pero no crea ni borra operadores.
+- superadmin → todo, incluido administrar operadores y crear, editar y borrar proyectos.
+- admin      → opera el sistema dentro de todos los proyectos, pero no administra
+               operadores ni proyectos (no los crea, edita ni borra).
 - cliente    → sólo ve y trabaja los proyectos que tiene asignados (tabla
                `operadores_proyectos`, N:M porque una persona puede llevar
                varios). Dentro de ellos arma bases de conocimiento, asistentes

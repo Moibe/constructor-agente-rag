@@ -1577,9 +1577,9 @@ def listar_proyectos(identidad: dict = Depends(require_sesion)):
 @app.post("/proyectos",
           tags=["Proyectos"],
           status_code=201,
-          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes. Requiere token admin.",
+          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes. Requiere rol superadmin: solo el superadmin decide qué proyectos existen.",
           summary="Crear Proyecto")
-def crear_proyecto(body: ProyectoCreate, identidad: dict = Depends(require_admin)):
+def crear_proyecto(body: ProyectoCreate, identidad: dict = Depends(require_superadmin)):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     descripcion = _validate_descripcion(body.descripcion)
@@ -1628,9 +1628,9 @@ def obtener_proyecto(pid: str, identidad: dict = Depends(require_sesion)):
 
 @app.put("/proyectos/{pid}",
          tags=["Proyectos"],
-         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables. Requiere token admin.",
+         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables. Requiere rol superadmin.",
          summary="Actualizar Proyecto")
-def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depends(require_admin)):
+def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depends(require_superadmin)):
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
     if body.slug is not None:
@@ -1679,9 +1679,9 @@ def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depend
 @app.delete("/proyectos/{pid}",
             tags=["Proyectos"],
             status_code=204,
-            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados. Requiere token admin.",
+            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados. Requiere rol superadmin.",
             summary="Borrar Proyecto")
-def borrar_proyecto(pid: str, identidad: dict = Depends(require_admin)):
+def borrar_proyecto(pid: str, identidad: dict = Depends(require_superadmin)):
     conn = _agentes_connection()
     try:
         row = conn.execute("SELECT id, slug, nombre FROM proyectos WHERE id=?", (pid,)).fetchone()
