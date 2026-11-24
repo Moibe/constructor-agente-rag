@@ -284,9 +284,12 @@ def identidad_actual(authorization: Optional[str] = Header(default=None)) -> Opt
     return None
 
 
-def require_admin(identidad: Optional[dict] = Depends(identidad_actual)) -> dict:
-    """Dependencia FastAPI: exige una credencial válida (sesión de operador o el
-    `ADMIN_PASSWORD` legacy) y devuelve la identidad.
+def require_sesion(identidad: Optional[dict] = Depends(identidad_actual)) -> dict:
+    """Dependencia FastAPI: exige una credencial válida de CUALQUIER rol (sesión
+    de operador, incluido 'cliente', o el `ADMIN_PASSWORD` legacy) y devuelve la
+    identidad. Es el piso de todo lo que usa el panel: sin cuenta no se entra.
+    Lo que un 'cliente' puede tocar se acota aparte, por proyecto (ver
+    `_exigir_proyecto` y las dependencias `sesion_con_*`).
 
     Levanta 401 si falta, está mal formada o no corresponde a nadie.
     Levanta 500 si el server no tiene NINGUNA forma de autenticar configurada
@@ -301,6 +304,76 @@ def require_admin(identidad: Optional[dict] = Depends(identidad_actual)) -> dict
                    "o siembra un superadmin con SUPERADMIN_EMAIL/SUPERADMIN_PASSWORD en el .env.",
         )
     raise HTTPException(status_code=401, detail="Credencial de admin requerida o inválida")
+
+
+def require_admin(identidad: dict = Depends(require_sesion)) -> dict:
+    """Sólo superadmin o admin (o el `ADMIN_PASSWORD` legacy). Un 'cliente' tiene
+    sesión válida pero no administra el sistema: recibe 403."""
+    if identidad["rol"] not in ("superadmin", "admin"):
+        raise HTTPException(status_code=403, detail="Tu cuenta no tiene permiso para esta operación.")
+    return identidad
+
+
+# ─── Alcance por proyecto (rol 'cliente') ──────────────────────────────────
+
+def _proyectos_permitidos(identidad: dict) -> Optional[set]:
+    """Ids de proyecto que esta identidad puede ver. None = todos (admin)."""
+    if identidad["rol"] == "cliente":
+        return set((identidad.get("operador") or {}).get("proyectos") or [])
+    return None
+
+
+def _exigir_proyecto(identidad: dict, proyecto_id: Optional[str]):
+    permitidos = _proyectos_permitidos(identidad)
+    if permitidos is not None and proyecto_id not in permitidos:
+        raise HTTPException(status_code=403, detail="No tienes acceso a este proyecto.")
+
+
+def sesion_con_proyecto(proyecto_id: str, identidad: dict = Depends(require_sesion)) -> dict:
+    """Sesión + acceso al proyecto del parámetro `proyecto_id`."""
+    _exigir_proyecto(identidad, proyecto_id)
+    return identidad
+
+
+def sesion_con_bc(contexto: str, identidad: dict = Depends(require_sesion)) -> dict:
+    """Sesión + acceso al proyecto dueño de la base de conocimiento `contexto`.
+    Una BC huérfana (sin proyecto) sólo la tocan los admins."""
+    if _proyectos_permitidos(identidad) is not None:
+        conn = _agentes_connection()
+        try:
+            row = conn.execute(
+                "SELECT proyecto_id FROM bases_conocimiento WHERE nombre_chroma=?", (contexto,)
+            ).fetchone()
+        finally:
+            conn.close()
+        _exigir_proyecto(identidad, row["proyecto_id"] if row else None)
+    return identidad
+
+
+def sesion_con_agente(aid: str, identidad: dict = Depends(require_sesion)) -> dict:
+    """Sesión + acceso al proyecto del asistente `aid`."""
+    conn = _agentes_connection()
+    try:
+        row = conn.execute("SELECT proyecto_id FROM agentes WHERE id=?", (aid,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Agente con id '{aid}' no encontrado.")
+    _exigir_proyecto(identidad, row["proyecto_id"])
+    return identidad
+
+
+def sesion_con_usuario(usuario_id: str, identidad: dict = Depends(require_sesion)) -> dict:
+    """Sesión + acceso al proyecto del usuario final `usuario_id`."""
+    conn = _agentes_connection()
+    try:
+        row = conn.execute("SELECT proyecto_id FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Usuario '{usuario_id}' no encontrado.")
+    _exigir_proyecto(identidad, row["proyecto_id"])
+    return identidad
 
 
 def require_superadmin(identidad: dict = Depends(require_admin)) -> dict:
@@ -896,23 +969,33 @@ class OperadorCreate(BaseModel):
     nombre: str
     password: str
     rol: str = 'admin'
+    # Sólo aplica al rol 'cliente': ids de los proyectos a los que puede entrar.
+    proyectos: Optional[list[str]] = None
 
 class OperadorUpdate(BaseModel):
+    # None = no tocar. Cambiarlo cambia con qué se entra; lo demás se conserva.
+    email: Optional[str] = None
     nombre: Optional[str] = None
     rol: Optional[str] = None
     activo: Optional[bool] = None
+    # None = no tocar; lista = reemplazar los proyectos asignados.
+    proyectos: Optional[list[str]] = None
 
 class OperadorPasswordReset(BaseModel):
     password_nueva: str
 
 @app.get("/listarContextos",
          tags=["Contextos"])
-def listar_contextos(proyecto_id: Optional[str] = None):
+def listar_contextos(proyecto_id: Optional[str] = None, identidad: dict = Depends(require_sesion)):
     """
     Lista todos los contextos del chatbot. Cada entrada incluye `proyecto_id`
     si la BC está registrada en `bases_conocimiento`. Si se pasa
     `?proyecto_id=...`, filtra a las BCs de ese proyecto (excluye huérfanas).
+    Un 'cliente' sólo recibe las de sus proyectos.
     """
+    permitidos = _proyectos_permitidos(identidad)
+    if proyecto_id:
+        _exigir_proyecto(identidad, proyecto_id)
     try:
         resultado = funciones.listar_contextos_con_conteo()
 
@@ -934,6 +1017,8 @@ def listar_contextos(proyecto_id: Optional[str] = None):
 
         if proyecto_id:
             resultado = {n: d for n, d in resultado.items() if d.get("proyecto_id") == proyecto_id}
+        if permitidos is not None:
+            resultado = {n: d for n, d in resultado.items() if d.get("proyecto_id") in permitidos}
 
         return {"Contextos existentes para este chatbot": resultado}
     except Exception as e:
@@ -941,7 +1026,7 @@ def listar_contextos(proyecto_id: Optional[str] = None):
     
 @app.post("/crearContexto",
           tags=["Contextos"])
-async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id: str, chunk_size: Optional[int] = None, identidad: dict = Depends(require_admin)):
+async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id: str, chunk_size: Optional[int] = None, identidad: dict = Depends(sesion_con_proyecto)):
     """
     Crea una BC vacía y la registra en `bases_conocimiento` asociada al
     `proyecto_id` indicado. Si `proyecto_id` no existe → 400.
@@ -1047,7 +1132,7 @@ async def crear_contexto(nombre_contexto: str, embedding_model: str, proyecto_id
 
 @app.delete("/borrarContexto",
             tags=["Contextos"])
-def borrar_contexto(contexto: str, force: bool = False, identidad: dict = Depends(require_admin)):
+def borrar_contexto(contexto: str, force: bool = False, identidad: dict = Depends(sesion_con_bc)):
     """
     Borra una colección de ChromaDB por su nombre.
 
@@ -1231,7 +1316,7 @@ async def integrar_documento(contexto: str, documento: UploadFile = File(...)):
          tags=["Contextos"],
          description="Le pone a una base de conocimiento un nombre legible para mostrar en el panel (ej. 'Pólizas de autos'). NO cambia su identificador: `nombre_chroma` sigue siendo el mismo en Chroma, en los asistentes que la usan y en la carpeta de documentos, así que renombrar nunca rompe una referencia. Mandar null o vacío quita la etiqueta y vuelve a mostrarse el identificador. Requiere token admin.",
          summary="Renombrar Base de Conocimiento")
-def renombrar_contexto(contexto: str, body: ContextoRenombrar, identidad: dict = Depends(require_admin)):
+def renombrar_contexto(contexto: str, body: ContextoRenombrar, identidad: dict = Depends(sesion_con_bc)):
     nombre = (body.nombre_visible or "").strip()
     if len(nombre) > 120:
         raise HTTPException(status_code=400, detail="El nombre no puede pasar de 120 caracteres.")
@@ -1272,7 +1357,7 @@ def renombrar_contexto(contexto: str, body: ContextoRenombrar, identidad: dict =
           tags=["Documentos"],
           description="Añade un snippet de TEXTO PLANO a una BC sin necesidad de subir un PDF. Útil para incorporar una Q&A puntual o una nota corta. El `filename` actúa como identidad del snippet (igual que el filename de un PDF en /integrarDocumento); /listarDocumentos, /quitarDocumento, /obtenerDocumento y /historialDocumentos lo tratan idéntico. Si ya existe un documento con ese filename en el contexto, lo reemplaza.",
           summary="Agregar Snippet de Texto")
-def agregar_snippet(contexto: str, body: SnippetRequest, identidad: dict = Depends(require_admin)):
+def agregar_snippet(contexto: str, body: SnippetRequest, identidad: dict = Depends(sesion_con_bc)):
     _validate_doc_path_part(contexto, "contexto")
     _validate_doc_path_part(body.filename, "filename")
 
@@ -1477,22 +1562,24 @@ def _con_nombre_visible_bc(conn, agentes):
          tags=["Proyectos"],
          description="Lista todos los proyectos, ordenados por fecha de creación descendente.",
          summary="Listar Proyectos")
-def listar_proyectos():
+def listar_proyectos(identidad: dict = Depends(require_sesion)):
+    permitidos = _proyectos_permitidos(identidad)
     conn = _agentes_connection()
     try:
         rows = conn.execute(
             f"SELECT {_PROYECTO_COLS} FROM proyectos ORDER BY creado_en DESC"
         ).fetchall()
-        return [_proyecto_to_response(dict(r)) for r in rows]
+        return [_proyecto_to_response(dict(r)) for r in rows
+                if permitidos is None or r["id"] in permitidos]
     finally:
         conn.close()
 
 @app.post("/proyectos",
           tags=["Proyectos"],
           status_code=201,
-          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes. Requiere token admin.",
+          description="Crea un nuevo proyecto. El proyecto agrupa bases de conocimiento y agentes. Requiere rol superadmin: solo el superadmin decide qué proyectos existen.",
           summary="Crear Proyecto")
-def crear_proyecto(body: ProyectoCreate, identidad: dict = Depends(require_admin)):
+def crear_proyecto(body: ProyectoCreate, identidad: dict = Depends(require_superadmin)):
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     descripcion = _validate_descripcion(body.descripcion)
@@ -1525,7 +1612,8 @@ def crear_proyecto(body: ProyectoCreate, identidad: dict = Depends(require_admin
          tags=["Proyectos"],
          description="Obtiene un proyecto por su ID.",
          summary="Obtener Proyecto")
-def obtener_proyecto(pid: str):
+def obtener_proyecto(pid: str, identidad: dict = Depends(require_sesion)):
+    _exigir_proyecto(identidad, pid)
     conn = _agentes_connection()
     try:
         row = conn.execute(
@@ -1540,9 +1628,9 @@ def obtener_proyecto(pid: str):
 
 @app.put("/proyectos/{pid}",
          tags=["Proyectos"],
-         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables. Requiere token admin.",
+         description="Actualiza nombre y/o descripción de un proyecto. id y slug son inmutables. Requiere rol superadmin.",
          summary="Actualizar Proyecto")
-def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depends(require_admin)):
+def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depends(require_superadmin)):
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
     if body.slug is not None:
@@ -1591,9 +1679,9 @@ def actualizar_proyecto(pid: str, body: ProyectoUpdate, identidad: dict = Depend
 @app.delete("/proyectos/{pid}",
             tags=["Proyectos"],
             status_code=204,
-            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados. Requiere token admin.",
+            description="Elimina un proyecto. Bloquea con 409 si tiene agentes o BCs asociados. Requiere rol superadmin.",
             summary="Borrar Proyecto")
-def borrar_proyecto(pid: str, identidad: dict = Depends(require_admin)):
+def borrar_proyecto(pid: str, identidad: dict = Depends(require_superadmin)):
     conn = _agentes_connection()
     try:
         row = conn.execute("SELECT id, slug, nombre FROM proyectos WHERE id=?", (pid,)).fetchone()
@@ -1623,32 +1711,6 @@ def borrar_proyecto(pid: str, identidad: dict = Depends(require_admin)):
                                      f"Borró el proyecto '{borrado['nombre']}' ({borrado['slug']})")
     finally:
         conn.close()
-
-@app.post("/proyectos/{pid}/verificar-password",
-          tags=["Proyectos"],
-          description="Verifica el password de un proyecto. NO requiere token admin: este endpoint lo usan los usuarios normales para entrar a su proyecto. Si el proyecto no tiene password, cualquier valor (o vacío) lo acepta.",
-          summary="Verificar Password de Proyecto")
-def verificar_password_proyecto(pid: str, body: VerificarPasswordRequest):
-    conn = _agentes_connection()
-    try:
-        row = conn.execute(
-            "SELECT password FROM proyectos WHERE id=?", (pid,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Proyecto con id '{pid}' no encontrado.")
-        stored = row["password"]
-    finally:
-        conn.close()
-
-    # Sin password configurado → acceso libre. Equivale al comportamiento previo
-    # a este feature, así que clientes viejos no se rompen.
-    if not stored:
-        return {"ok": True}
-
-    if body.password is not None and body.password == stored:
-        return {"ok": True}
-
-    raise HTTPException(status_code=401, detail="Password incorrecto")
 
 @app.post("/chatbot",
           tags=["Chatbot"])
@@ -1797,7 +1859,10 @@ def chatbot(data: ChatRequest):
          tags=["Agentes"],
          description="Lista todos los agentes. Acepta ?proyecto_id=... para filtrar.",
          summary="Listar Agentes")
-def listar_agentes(proyecto_id: Optional[str] = None):
+def listar_agentes(proyecto_id: Optional[str] = None, identidad: Optional[dict] = Depends(identidad_actual)):
+    # Público a propósito: los widgets lo consultan sin credencial. Pero si quien
+    # pregunta es una cuenta de cliente (el panel), sólo recibe los de sus proyectos.
+    permitidos = _proyectos_permitidos(identidad) if identidad else None
     conn = _agentes_connection()
     try:
         if proyecto_id:
@@ -1809,7 +1874,8 @@ def listar_agentes(proyecto_id: Optional[str] = None):
             rows = conn.execute(
                 f"SELECT {_AGENTE_COLS} FROM agentes ORDER BY creado_en DESC"
             ).fetchall()
-        return registro_fuentes.anexar_a_agentes(conn, _con_nombre_visible_bc(conn, [dict(r) for r in rows]))
+        filas = [dict(r) for r in rows if permitidos is None or r["proyecto_id"] in permitidos]
+        return registro_fuentes.anexar_a_agentes(conn, _con_nombre_visible_bc(conn, filas))
     finally:
         conn.close()
 
@@ -1818,7 +1884,11 @@ def listar_agentes(proyecto_id: Optional[str] = None):
           status_code=201,
           description="Crea un agente. Requiere proyecto_id; el contexto referenciado debe ser una BC del mismo proyecto.",
           summary="Crear Agente")
-def crear_agente(body: AgenteCreate, identidad: dict = Depends(require_admin)):
+def crear_agente(body: AgenteCreate, identidad: dict = Depends(require_sesion)):
+    _exigir_proyecto(identidad, body.proyecto_id)
+    if identidad["rol"] == "cliente":
+        # Las fuentes de datos son cosa de admins: un cliente no las asigna.
+        body.fuentes = None
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
     instrucciones = _validate_no_empty(body.instrucciones, "instrucciones")
@@ -1897,7 +1967,12 @@ def obtener_agente(aid: str):
                tags=["Agentes"],
                description="Actualiza campos del bundle. id y slug son inmutables. Campos no enviados se mantienen (partial update, semántica PATCH/PUT). Si cambias proyecto_id o contexto, se valida la consistencia BC↔proyecto.",
                summary="Actualizar Agente")
-def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(require_admin)):
+def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(sesion_con_agente)):
+    if identidad["rol"] == "cliente":
+        # No enviadas = se conservan las que haya puesto un admin.
+        body.fuentes = None
+    if body.proyecto_id is not None:
+        _exigir_proyecto(identidad, body.proyecto_id)
     if body.id is not None:
         raise HTTPException(status_code=400, detail="id no es modificable.")
     if body.slug is not None:
@@ -2042,7 +2117,7 @@ def actualizar_agente(aid: str, body: AgenteUpdate, identidad: dict = Depends(re
           tags=["Agentes"],
           description="Sube el ícono custom del avatar del widget. Se guarda como data URI en la fila del agente (no en disco) para que viaje junto al resto de la config y no dependa de rutas estáticas. Máximo 64KB; formatos: png, jpg, webp, gif, svg. Requiere token admin.",
           summary="Subir Ícono de Agente")
-async def subir_icono_agente(aid: str, icono: UploadFile = File(...), identidad: dict = Depends(require_admin)):
+async def subir_icono_agente(aid: str, icono: UploadFile = File(...), identidad: dict = Depends(sesion_con_agente)):
     mime = (icono.content_type or '').split(';')[0].strip().lower()
     if mime not in ICONO_MIME_PERMITIDOS:
         raise HTTPException(
@@ -2082,7 +2157,7 @@ async def subir_icono_agente(aid: str, icono: UploadFile = File(...), identidad:
             tags=["Agentes"],
             description="Quita el ícono custom del agente; el widget vuelve a usar su ícono por defecto. Requiere token admin.",
             summary="Quitar Ícono de Agente")
-def borrar_icono_agente(aid: str, identidad: dict = Depends(require_admin)):
+def borrar_icono_agente(aid: str, identidad: dict = Depends(sesion_con_agente)):
     conn = _agentes_connection()
     try:
         if not conn.execute("SELECT id FROM agentes WHERE id=?", (aid,)).fetchone():
@@ -2105,7 +2180,7 @@ def borrar_icono_agente(aid: str, identidad: dict = Depends(require_admin)):
             status_code=204,
             description="Elimina un agente por su ID.",
             summary="Borrar Agente")
-def borrar_agente(aid: str, identidad: dict = Depends(require_admin)):
+def borrar_agente(aid: str, identidad: dict = Depends(sesion_con_agente)):
     conn = _agentes_connection()
     try:
         previo = conn.execute("SELECT slug, nombre FROM agentes WHERE id=?", (aid,)).fetchone()
@@ -2271,7 +2346,7 @@ def probar_fuente(fid: str, body: FuenteProbar, identidad: dict = Depends(requir
           tags=["Logs"],
           description="Registra un log de conversación en la base de datos SQLite.",
           summary="Registrar Log")
-def registrar_log(data: LogRequest, _: dict = Depends(require_admin)):
+def registrar_log(data: LogRequest, _: dict = Depends(require_sesion)):
     try:
         conn = sqlite3.connect(LOG_DB_PATH)
         conn.execute(
@@ -2300,7 +2375,7 @@ def registrar_log(data: LogRequest, _: dict = Depends(require_admin)):
          tags=["Consumo"],
          description="Métricas agregadas del periodo (por defecto últimos 30 días). Fuente: logs.db + agentes.db + Chroma. Pensado para el dashboard de Consumo del admin.",
          summary="Resumen de Consumo")
-def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, usuario: Optional[str] = None, asistente: Optional[str] = None):
+def consumo_resumen(desde: Optional[str] = None, hasta: Optional[str] = None, usuario: Optional[str] = None, asistente: Optional[str] = None, _: dict = Depends(require_admin)):
     from datetime import date, timedelta, datetime, timezone
 
     # UTC, igual que /registros. Con date.today() local el rango terminaba antes
@@ -2739,7 +2814,7 @@ def _validate_nombre_modelo(nombre: str) -> str:
          tags=["Modelos"],
          description="Registro de modelos: nombre, proveedor y tarifas USD por 1M de tokens. Es la fuente de verdad que puebla el dropdown de modelo del asistente (?solo_activos=true) y el tab de Tarifas del admin. Lectura pública porque el host de widgets no tiene token.",
          summary="Listar Registro de Modelos")
-def listar_registro_modelos(solo_activos: bool = False):
+def listar_registro_modelos(solo_activos: bool = False, _: dict = Depends(require_sesion)):
     return {"modelos": [_modelo_to_response(m) for m in registro_modelos.listar(solo_activos=solo_activos)]}
 
 
@@ -2916,8 +2991,13 @@ def _usuario_to_response(row: dict) -> dict:
          tags=["Usuarios"],
          description="Registro de usuarios finales identificados (no autenticados) por proyecto — ej. 'Cristian QA', 'Bryan PO'. Es la fuente de verdad que resuelve el `?usuario=<slug>` del widget y puebla el tab Usuarios del admin. Lectura pública porque el host de widgets no tiene token.",
          summary="Listar Usuarios")
-def listar_registro_usuarios(proyecto_id: Optional[str] = None, solo_activos: bool = False):
-    return {"usuarios": [_usuario_to_response(u) for u in registro_usuarios.listar(proyecto_id=proyecto_id, solo_activos=solo_activos)]}
+def listar_registro_usuarios(proyecto_id: Optional[str] = None, solo_activos: bool = False, identidad: dict = Depends(require_sesion)):
+    permitidos = _proyectos_permitidos(identidad)
+    if proyecto_id:
+        _exigir_proyecto(identidad, proyecto_id)
+    filas = registro_usuarios.listar(proyecto_id=proyecto_id, solo_activos=solo_activos)
+    return {"usuarios": [_usuario_to_response(u) for u in filas
+                         if permitidos is None or u["proyecto_id"] in permitidos]}
 
 
 @app.post("/usuarios",
@@ -2925,7 +3005,8 @@ def listar_registro_usuarios(proyecto_id: Optional[str] = None, solo_activos: bo
           status_code=201,
           description="Registra un usuario final nuevo dentro de un proyecto. El slug es único por proyecto (no globalmente) y es lo que va en la URL `?usuario=<slug>` del widget. Requiere token admin.",
           summary="Crear Usuario")
-def crear_usuario(body: UsuarioCreate, identidad: dict = Depends(require_admin)):
+def crear_usuario(body: UsuarioCreate, identidad: dict = Depends(require_sesion)):
+    _exigir_proyecto(identidad, body.proyecto_id)
     _validate_proyecto_existe(body.proyecto_id)
     slug = _validate_slug(body.slug)
     nombre = _validate_nombre(body.nombre)
@@ -2955,7 +3036,7 @@ def crear_usuario(body: UsuarioCreate, identidad: dict = Depends(require_admin))
          tags=["Usuarios"],
          description="Actualiza nombre, estado o notas de un usuario. El proyecto y el slug son inmutables (el slug ya viaja en URLs entregadas y en chat_logs históricos); para renombrar el slug, crear uno nuevo y desactivar este. Requiere token admin.",
          summary="Actualizar Usuario")
-def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, identidad: dict = Depends(require_admin)):
+def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, identidad: dict = Depends(sesion_con_usuario)):
     conn = _agentes_connection()
     try:
         row = conn.execute(f"SELECT {registro_usuarios.COLS} FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
@@ -2986,7 +3067,7 @@ def actualizar_usuario(usuario_id: str, body: UsuarioUpdate, identidad: dict = D
             status_code=204,
             description="Elimina un usuario del registro. A diferencia de /modelos, esto NUNCA se bloquea por uso: el nombre ya quedó denormalizado en cada chat_log al momento de la consulta, así que borrar el usuario no corrompe el histórico. Requiere token admin.",
             summary="Borrar Usuario")
-def borrar_usuario(usuario_id: str, identidad: dict = Depends(require_admin)):
+def borrar_usuario(usuario_id: str, identidad: dict = Depends(sesion_con_usuario)):
     conn = _agentes_connection()
     try:
         fila = conn.execute("SELECT slug, nombre FROM usuarios WHERE id=?", (usuario_id,)).fetchone()
@@ -3100,7 +3181,7 @@ def borrar_hito(hito_id: str, identidad: dict = Depends(require_admin)):
          tags=["Modelos"],
          description="Consulta Ollama y retorna la lista de modelos descargados localmente. Es la vista de 'qué hay instalado en la máquina', distinta de GET /modelos (el registro con proveedores y tarifas).",
          summary="Listar Modelos")
-async def listar_modelos():
+async def listar_modelos(_: dict = Depends(require_sesion)):
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     try:
         async with httpx.AsyncClient() as client:
@@ -3117,7 +3198,7 @@ async def listar_modelos():
          tags=["Modelos"],
          description="Retorna los detalles de un modelo de Ollama (arquitectura, parámetros, etc.).",
          summary="Info de Modelo")
-async def info_modelo(modelo: str):
+async def info_modelo(modelo: str, _: dict = Depends(require_sesion)):
     OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
     try:
         async with httpx.AsyncClient() as client:
@@ -3270,8 +3351,13 @@ def listar_operadores(_: dict = Depends(require_superadmin)):
           summary="Crear Operador")
 def crear_operador(body: OperadorCreate, identidad: dict = Depends(require_superadmin)):
     rol = _validar_rol_asignable(body.rol)
+    for pid in (body.proyectos or []):
+        _validate_proyecto_existe(pid)
     try:
         creado = registro_operadores.crear(body.email, body.nombre, body.password, rol=rol)
+        if body.proyectos is not None:
+            registro_operadores.asignar_proyectos(creado["id"], body.proyectos)
+            creado = registro_operadores.resumen(creado["id"])
         registro_auditoria.registrar(identidad, 'crear', 'operador', creado["id"],
                                      f"Dio de alta al operador {creado['email']} con rol {rol}")
         return creado
@@ -3285,19 +3371,41 @@ def crear_operador(body: OperadorCreate, identidad: dict = Depends(require_super
 
 @app.put("/operadores/{operador_id}",
          tags=["Operadores"],
-         description="Cambia nombre, rol o estado de un operador. Desactivarlo cierra sus sesiones al instante. No deja dejar al sistema sin superadmin activo ni modificar la propia cuenta. El email es inmutable: es la credencial y lo que identifica sus sesiones. Requiere rol superadmin.",
+         description="Cambia nombre, rol o estado de un operador. Desactivarlo cierra sus sesiones al instante. No deja dejar al sistema sin superadmin activo ni modificar la propia cuenta. El email se puede cambiar (es con lo que entra; conserva contraseña, rol, proyectos y sesiones) y debe ser único. Requiere rol superadmin.",
          summary="Actualizar Operador")
 def actualizar_operador(operador_id: str, body: OperadorUpdate, identidad: dict = Depends(require_superadmin)):
-    if body.rol is not None or body.activo is not None:
-        _no_contra_si_mismo(identidad, operador_id, "cambiarle el rol ni desactivar")
+    previo = registro_operadores.obtener(operador_id)
+    if previo is None:
+        raise HTTPException(status_code=404, detail=f"No existe el operador '{operador_id}'.")
     rol = None if body.rol is None else _validar_rol_asignable(body.rol)
+    # El guard es contra CAMBIARSE el rol o desactivarse: mandar el mismo valor
+    # que ya se tiene (el formulario del panel siempre manda el rol) no cuenta,
+    # o nadie podría editar su propio nombre o email.
+    cambia_rol = rol is not None and rol != previo["rol"]
+    cambia_activo = body.activo is not None and bool(body.activo) != bool(previo["activo"])
+    if cambia_rol or cambia_activo:
+        _no_contra_si_mismo(identidad, operador_id, "cambiarle el rol ni desactivar")
+    for pid in (body.proyectos or []):
+        _validate_proyecto_existe(pid)
     try:
-        actualizado = registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol, activo=body.activo)
-        registro_auditoria.registrar(identidad, 'actualizar', 'operador', operador_id,
-                                     f"Editó al operador {actualizado['email']}",
-                                     detalle={"campos": sorted(body.model_fields_set),
-                                              "rol": actualizado["rol"], "activo": actualizado["activo"]})
+        actualizado = registro_operadores.actualizar(operador_id, nombre=body.nombre, rol=rol,
+                                                     activo=body.activo, email=body.email)
+        if body.proyectos is not None:
+            registro_operadores.asignar_proyectos(operador_id, body.proyectos)
+            actualizado = registro_operadores.resumen(operador_id)
+        cambio_email = actualizado["email"] != previo["email"]
+        detalle = {"campos": sorted(body.model_fields_set),
+                   "rol": actualizado["rol"], "activo": actualizado["activo"]}
+        if cambio_email:
+            detalle["email_anterior"] = previo["email"]
+        registro_auditoria.registrar(
+            identidad, 'actualizar', 'operador', operador_id,
+            (f"Cambió el email del operador {previo['email']} a {actualizado['email']}" if cambio_email
+             else f"Editó al operador {actualizado['email']}"),
+            detalle=detalle)
         return actualizado
+    except registro_operadores.EmailDuplicado as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except registro_operadores.UltimoSuperadmin as e:
@@ -3370,12 +3478,22 @@ def listar_auditoria(
     if desde_date and hasta_date and desde_date > hasta_date:
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta.")
 
-    return registro_auditoria.listar(
+    resultado = registro_auditoria.listar(
         desde=desde_date.isoformat() if desde_date else None,
         # Rango inclusivo: [desde 00:00, hasta+1 día 00:00), igual que /registros.
         hasta_exclusivo=(hasta_date + timedelta(days=1)).isoformat() if hasta_date else None,
         operador=operador, entidad=entidad, accion=accion, limit=limit, offset=offset,
     )
+    # El filtro "Quién" va por cuenta. Si la cuenta sigue existiendo se muestra con
+    # su nombre y email de HOY (pudieron cambiar); si ya la borraron, con los
+    # últimos que dejó en la bitácora.
+    for cuenta in resultado.get("cuentas", []):
+        vigente = registro_operadores.obtener(cuenta["id"])
+        cuenta["existe"] = vigente is not None
+        if vigente:
+            cuenta["email"], cuenta["nombre"] = vigente["email"], vigente["nombre"]
+    resultado.get("cuentas", []).sort(key=lambda c: (c.get("nombre") or c.get("email") or "").lower())
+    return resultado
 
 
 @app.get("/health",
@@ -3431,7 +3549,7 @@ def auth_logout(authorization: Optional[str] = Header(default=None)):
          tags=["Auth"],
          description="Quién soy: identidad de la credencial actual. `tipo` es 'operador' (cuenta propia) o 'legacy' (ADMIN_PASSWORD compartido, sin identidad).",
          summary="Identidad actual")
-def auth_yo(identidad: dict = Depends(require_admin)):
+def auth_yo(identidad: dict = Depends(require_sesion)):
     return identidad
 
 
@@ -3439,7 +3557,7 @@ def auth_yo(identidad: dict = Depends(require_admin)):
           tags=["Auth"],
           description="Cambia la contraseña del operador de la sesión actual, pidiendo la contraseña vigente. Cierra las demás sesiones de esa cuenta. No aplica al ADMIN_PASSWORD legacy, que se cambia en el .env del server.",
           summary="Cambiar mi contraseña")
-def auth_cambiar_password(body: CambiarPasswordRequest, identidad: dict = Depends(require_admin)):
+def auth_cambiar_password(body: CambiarPasswordRequest, identidad: dict = Depends(require_sesion)):
     if identidad["tipo"] != "operador":
         raise HTTPException(
             status_code=400,
